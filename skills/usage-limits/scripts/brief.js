@@ -1169,7 +1169,7 @@ function guardLine(now, budget) {
 async function run(now, hookInput) {
   if (String(process.env.USAGE_LIMITS_BRIEF || '').toLowerCase() === 'off') return '';
 
-  const sessionId = hookInput && hookInput.session_id ? hookInput.session_id : null;
+  const sessionId = hookInput && (hookInput.session_id || hookInput.conversationId) ? (hookInput.session_id || hookInput.conversationId) : null;
   // Which budget mode is in force, settled before anything expensive happens.
   // In `off` this whole hook is one small file read and then nothing: no
   // reading, no scan, no activity mark, no injection. That mode's promise is
@@ -1179,10 +1179,12 @@ async function run(now, hookInput) {
   const budget = mode.forSession({ sessionId });
   if (budget.policy.briefStyle === 'none') return guardLine(now, budget);
 
-  // Codex cannot ship a hook inside a plugin, so its hook is installed into
-  // ~/.codex/hooks.json with the host written into the command. Settle it here,
-  // before any file is read.
-  usage.setHost(host.detect(process.argv.slice(2), process.env));
+  // Settle host here, before any file is read.
+  const detectedHost = host.detect(process.argv.slice(2), process.env);
+  const effectiveHost = (hookInput && (hookInput.conversationId || hookInput.invocationNum !== undefined))
+    ? host.GEMINI
+    : detectedHost;
+  usage.setHost(effectiveHost);
   // A prompt has arrived, so this session is working, and the prompt itself
   // says whether it asked for ultracode. The panel animates from this.
   activity.mark(
@@ -1437,10 +1439,25 @@ async function run(now, hookInput) {
 
 if (require.main === module) {
   readHookInput()
-    .then((input) => run(Date.now(), input))
+    .then(async (input) => {
+      const isGeminiHook = Boolean(
+        (input && (input.conversationId || input.invocationNum !== undefined)) ||
+        (process.argv.includes('--host') && process.argv[process.argv.indexOf('--host') + 1] === 'gemini') ||
+        process.argv.includes('--gemini-hook')
+      );
+      const text = await run(Date.now(), input);
+      return { text, isGeminiHook };
+    })
     .then(
-      (text) => {
-        if (text) process.stdout.write(text + '\n');
+      ({ text, isGeminiHook }) => {
+        if (isGeminiHook) {
+          const payload = {
+            injectSteps: text ? [{ ephemeralMessage: text }] : []
+          };
+          process.stdout.write(JSON.stringify(payload) + '\n');
+        } else {
+          if (text) process.stdout.write(text + '\n');
+        }
         process.exit(0);
       },
       () => {

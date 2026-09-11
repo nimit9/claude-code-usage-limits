@@ -75,5 +75,8 @@ test('detection never picks Codex while a Claude snapshot is readable', () => {
     // An explicit request still wins; detection is only the fallback.
     assert.strictEqual(host.detect(['--host', 'codex'], {}), host.CODEX);
     assert.strictEqual(host.detect([], { USAGE_LIMITS_HOST: 'codex' }), host.CODEX);
+    assert.strictEqual(host.detect(['--host', 'gemini'], {}), host.GEMINI);
+    assert.strictEqual(host.detect([], { USAGE_LIMITS_HOST: 'gemini' }), host.GEMINI);
+    assert.strictEqual(host.detect([], { ANTIGRAVITY_CLI: '1' }), host.GEMINI);
   });
 });

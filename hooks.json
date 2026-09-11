@@ -1,0 +1,11 @@
+{
+  "usage-limits-brief": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "node ./skills/usage-limits/scripts/brief.js --host gemini",
+        "timeout": 10
+      }
+    ]
+  }
+}

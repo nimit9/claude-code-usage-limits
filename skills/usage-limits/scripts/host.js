@@ -18,6 +18,15 @@ const path = require('path');
 
 const CLAUDE = 'claude';
 const CODEX = 'codex';
+const GEMINI = 'gemini';
+
+function geminiConfigDir() {
+  return process.env.GEMINI_CONFIG_DIR || path.join(os.homedir(), '.gemini');
+}
+
+function geminiHome() {
+  return process.env.GEMINI_HOME || path.join(geminiConfigDir(), 'antigravity-cli');
+}
 
 function codexHome() {
   return process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
@@ -66,16 +75,20 @@ function codexHasSessions() {
   return exists(path.join(codexHome(), 'sessions'));
 }
 
+function geminiHasSessions() {
+  return exists(geminiHome());
+}
+
 function normalise(value) {
   const name = String(value || '').trim().toLowerCase();
+  if (name === GEMINI || name === 'agy' || name === 'antigravity' || name === 'google') return GEMINI;
   if (name === CODEX || name === 'chatgpt' || name === 'openai') return CODEX;
   if (name === CLAUDE || name === 'claude-code' || name === 'anthropic') return CLAUDE;
   return null;
 }
 
-// `--host codex` beats everything, then the environment variable, then what is
-// actually on disk. Claude wins ties: it is the host the hook was written for,
-// and its reader fails loudly rather than silently reporting nothing.
+// `--host gemini` beats everything, then the environment variable, then what is
+// actually on disk.
 function detect(argv, env) {
   const args = argv || [];
   const at = args.indexOf('--host');
@@ -86,6 +99,8 @@ function detect(argv, env) {
   const fromEnv = normalise(environment.USAGE_LIMITS_HOST);
   if (fromEnv) return fromEnv;
 
+  // Set by Antigravity / Gemini CLI
+  if (environment.ANTIGRAVITY_CLI || environment.GEMINI_CLI || environment.GEMINI_WORKSPACE) return GEMINI;
   // Set by Claude Code for plugin hooks and commands.
   if (environment.CLAUDE_PLUGIN_ROOT || environment.CLAUDE_PROJECT_DIR) return CLAUDE;
   // Set by Codex for the processes it launches.
@@ -93,14 +108,19 @@ function detect(argv, env) {
 
   if (claudeHasSnapshot()) return CLAUDE;
   if (codexHasSessions()) return CODEX;
+  if (geminiHasSessions()) return GEMINI;
   return CLAUDE;
 }
 
 module.exports = {
   CLAUDE,
   CODEX,
+  GEMINI,
   detect,
   normalise,
+  geminiHome,
+  geminiConfigDir,
+  geminiHasSessions,
   codexHome,
   claudeConfigDir,
   claudeHasSnapshot,

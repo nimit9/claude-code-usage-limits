@@ -45,6 +45,10 @@ function isCodex() {
   return currentHost() === host.CODEX;
 }
 
+function isGemini() {
+  return currentHost() === host.GEMINI;
+}
+
 const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
@@ -2323,17 +2327,22 @@ function levers(which) {
   // `host` is the required module here, not a parameter - shadowing it was a
   // ReferenceError on the constant it owns.
   const codex = which === host.CODEX;
+  const gemini = which === host.GEMINI;
   return {
     model: (family) =>
-      codex
-        ? "Codex's own model control (the script only saves defaults for new sessions: " +
-          'node scripts/lowpower.js on --host codex --model <id>)'
-        : '/model ' + (family || '<another model>') + ' (or node scripts/lowpower.js on --model <id>)',
+      gemini
+        ? 'Gemini CLI model flag (agy --model ' + (family || '<model>') + ')'
+        : codex
+          ? "Codex's own model control (the script only saves defaults for new sessions: " +
+            'node scripts/lowpower.js on --host codex --model <id>)'
+          : '/model ' + (family || '<another model>') + ' (or node scripts/lowpower.js on --model <id>)',
     effort: (level) =>
-      codex
-        ? "Codex's own effort control for this task (node scripts/lowpower.js on --host codex --effort " +
-          (level || '<level>') + ' saves it for new sessions and cannot change one already running)'
-        : '/effort ' + (level || '<level>'),
+      gemini
+        ? 'Gemini CLI effort flag (agy --effort ' + (level || 'low|medium|high') + ')'
+        : codex
+          ? "Codex's own effort control for this task (node scripts/lowpower.js on --host codex --effort " +
+            (level || '<level>') + ' saves it for new sessions and cannot change one already running)'
+          : '/effort ' + (level || '<level>'),
   };
 }
 
@@ -2675,7 +2684,46 @@ function snapshotWindows(collected, now, codexHome) {
   return [...byKey.values()];
 }
 
+function collectGemini(now) {
+  let claudeSnapshot = null;
+  try {
+    const claudeFile = host.claudeSnapshotFile();
+    if (claudeFile) {
+      const parsed = readJson(claudeFile);
+      if (parsed && parsed.cachedUsageUtilization) {
+        claudeSnapshot = parsed.cachedUsageUtilization;
+      }
+    }
+  } catch (err) {}
+
+  const settingsFile = path.join(host.geminiConfigDir(), 'antigravity-cli', 'settings.json');
+  const settings = readJson(settingsFile) || {};
+
+  const utilization = claudeSnapshot && claudeSnapshot.utilization ? claudeSnapshot.utilization : null;
+  return {
+    now,
+    host: host.GEMINI,
+    money: false,
+    accountFile: settingsFile,
+    plan: 'Google AI Plus',
+    planId: 'google_ai_plus',
+    planTier: 'google_ai_plus',
+    planAdvice: 'Google AI Plus plan with Gemini 2.5 Flash / Gemini 3.x Flash & Pro models.',
+    snapshotAgeMs: claudeSnapshot && claudeSnapshot.fetchedAtMs ? now - claudeSnapshot.fetchedAtMs : null,
+    snapshotFetchedAt: claudeSnapshot && claudeSnapshot.fetchedAtMs ? claudeSnapshot.fetchedAtMs : null,
+    snapshotSource: utilization ? 'cross-agent-claude' : null,
+    utilization,
+    settings: {
+      model: settings.model || 'Gemini 3.8 Flash (High)',
+      effortLevel: settings.effortLevel || 'high',
+      agentMode: settings.agentMode || 'accept-edits',
+    },
+    extraUsage: null,
+  };
+}
+
 function collect(now) {
+  if (isGemini()) return collectGemini(now);
   if (isCodex()) return codex.collect(now);
   return collectClaude(now);
 }
@@ -3322,7 +3370,7 @@ function render(data) {
   // honest money column. Everything else in the table means the same thing on
   // both hosts.
   const money = data.money !== false;
-  lines.push((data.host === host.CODEX ? 'Codex usage' : 'Claude Code usage'));
+  lines.push((data.host === host.CODEX ? 'Codex usage' : data.host === host.GEMINI ? 'Gemini usage' : 'Claude Code usage'));
   lines.push('');
   lines.push('  Plan       ' + data.plan);
   lines.push(
