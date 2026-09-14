@@ -53,6 +53,22 @@ const EVENTS = [
   // tool calls of its own for as long as they run. Same quiet refresh as on
   // Claude Code; pulse.js sees the event name and says nothing.
   { event: 'SubagentStop', script: 'pulse.js', status: 'Checking usage limits' },
+  // The ceiling, and the only entry here that can refuse anything.
+  //
+  // Codex is the host where a reported figure demonstrably does not change
+  // behaviour, and the reason is not stubbornness: gpt-6-astra's own system
+  // prompt, shipped in models_cache.json, tells it "do not settle for a partial
+  // or helpful enough solution that does not fully satisfy the user's task to
+  // save time, effort or tokens", and ranks the live user instruction above
+  // anything an AGENTS.md or a skill says. A line asking it to economise is
+  // arguing with its own instructions and losing.
+  //
+  // So this one does not ask. PreToolUse takes a permissionDecision of "deny",
+  // and past the ceiling the fan-out calls get one. The matcher is broad
+  // because ceiling.js decides what is actually a multiplier; a hook that fires
+  // and returns nothing costs a few milliseconds, and a matcher that misses a
+  // renamed tool costs the window.
+  { event: 'PreToolUse', script: 'pulse.js', status: 'Checking usage limits', matcher: '.*' },
 ];
 const EVENT = EVENTS[0].event;
 // Ten seconds is the same budget the Claude hook gets. The brief caches the
@@ -360,7 +376,7 @@ function enable() {
 
   for (const one of EVENTS) {
     const rest = withoutOurs(config.hooks[one.event]);
-    rest.push({
+    const group = {
       hooks: [
         {
           type: 'command',
@@ -369,7 +385,11 @@ function enable() {
           statusMessage: one.status,
         },
       ],
-    });
+    };
+    // Tool-scoped events take a matcher; the others ignore one, and writing a
+    // matcher where none belongs is the kind of thing a strict parser rejects.
+    if (one.matcher) group.matcher = one.matcher;
+    rest.push(group);
     config.hooks[one.event] = rest;
   }
   if (!config.description) {

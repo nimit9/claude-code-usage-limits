@@ -28,6 +28,7 @@ const host = require('./host.js');
 const activity = require('./activity.js');
 const live = require('./live.js');
 const mode = require('./mode.js');
+const ceiling = require('./ceiling.js');
 
 const SECOND = 1000;
 const DEFAULT_INTERVAL_SECONDS = 120;
@@ -238,6 +239,27 @@ async function run(now, hookInput) {
   // pulse had last read as 24%.
   const tool = hookInput && hookInput.tool_name ? String(hookInput.tool_name) : '';
   const fanout = event === 'PreToolUse' && /^(Workflow|Agent|Task)$/.test(tool);
+
+  // The ceiling, checked before the throttle and before any scan.
+  //
+  // Everything else in this hook is advice, and advice is throttled so it does
+  // not become noise. A refusal that only arrives when the pulse happens to be
+  // due is not a refusal, so this runs on every fan-out regardless, off the two
+  // readings that are already on disk. It is the one thing here that does not
+  // ask the model to agree with it.
+  if (event === 'PreToolUse' && ceiling.isMultiplier(tool)) {
+    try {
+      const at = ceiling.assess({
+        percent: ceilingPercent(now),
+        state: budget.state,
+        env: process.env,
+      });
+      const call = ceiling.verdict(at, tool);
+      if (call.decision === 'deny') return { deny: true, reason: call.reason };
+    } catch (err) {
+      // A ceiling that throws must not block the call it was asked to judge.
+    }
+  }
   // The other way a turn goes quiet for a long time: one foreground tool call
   // that runs for minutes. See longCall().
   const long = event === 'PreToolUse' && !fanout && longCall(hookInput && hookInput.tool_input, intervalMs(budget.policy));
@@ -390,6 +412,48 @@ async function run(now, hookInput) {
   return recheck ? (spoken ? spoken + ' ' + recheck : recheck) : spoken;
 }
 
+// The cheapest percentage good enough to enforce a ceiling against.
+//
+// The ceiling is checked before every fan-out, which is far too often to scan
+// transcripts for. Two sources are already paid for: the corrected reading the
+// last scan left behind, and the account snapshot, which is one small file
+// read. The highest of them wins, because a ceiling means "no window past
+// here" - taking the emptiest window would be a ceiling that never binds.
+//
+// Returns null when neither source has anything, and a ceiling with no reading
+// behind it never refuses. Guessing high would block work over a number nobody
+// measured; guessing low would not be a ceiling at all.
+function ceilingPercent(now) {
+  let worst = null;
+  const consider = (value) => {
+    if (!Number.isFinite(value)) return;
+    if (worst === null || value > worst) worst = value;
+  };
+  const codexHome = usage.isCodex() ? require('./codex.js').homeDir() : null;
+  try {
+    const entries = reading.read(codexHome);
+    for (const key of Object.keys(entries)) {
+      const entry = reading.correctedFor(key, now, null, codexHome);
+      if (entry) consider(entry.percentUsed);
+    }
+  } catch (err) {
+    // A missing or unreadable correction just means the snapshot decides.
+  }
+  try {
+    const snapshot = usage.collect(now);
+    const utilization = snapshot && snapshot.utilization;
+    if (utilization && typeof utilization === 'object') {
+      for (const key of Object.keys(utilization)) {
+        const window = utilization[key];
+        if (window && typeof window === 'object') consider(Number(window.utilization));
+      }
+    }
+  } catch (err) {
+    // Same: no snapshot is a reason not to enforce, not a reason to throw.
+  }
+  return worst;
+}
+
 // PostToolUse does not take plain stdout as context the way UserPromptSubmit
 // does, so the line is returned in the documented envelope instead.
 function envelope(text, event) {
@@ -399,6 +463,22 @@ function envelope(text, event) {
     hookSpecificOutput: {
       hookEventName: event === 'PreToolUse' ? 'PreToolUse' : 'PostToolUse',
       additionalContext: text,
+    },
+  });
+}
+
+// The refusal envelope.
+//
+// Claude Code and Codex document the same PreToolUse shape: a permissionDecision
+// of "deny" with a reason, which is shown to the model in place of the tool
+// result. Exit code stays 0 - exit 2 also blocks, but routes the reason through
+// stderr, and a reason the model can read is the entire point of refusing.
+function refusal(reason) {
+  return JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'deny',
+      permissionDecisionReason: reason,
     },
   });
 }
@@ -436,8 +516,14 @@ if (require.main === module) {
       return run(Date.now(), input);
     })
     .then(
-      (text) => {
-        if (text) process.stdout.write(envelope(text, hookEvent) + '\n');
+      (result) => {
+        // A refusal, not a line. Claude Code and Codex take the same shape
+        // here; Antigravity's differs and is handled by its own entry point.
+        if (result && typeof result === 'object' && result.deny) {
+          process.stdout.write(refusal(result.reason) + '\n');
+          process.exit(0);
+        }
+        if (result) process.stdout.write(envelope(result, hookEvent) + '\n');
         process.exit(0);
       },
       () => {
@@ -460,5 +546,7 @@ module.exports = {
   longCall,
   pulseText,
   envelope,
+  refusal,
+  ceilingPercent,
   run,
 };

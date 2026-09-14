@@ -87,15 +87,46 @@ reason, if none of them are in use.
 
 Cache reads are ten times cheaper than fresh input, and the cache matches on
 an exact prefix. Any byte that changes early invalidates everything after it.
-Things that invalidate it mid-session:
+What actually invalidates it mid-session:
 
-- switching models
-- editing `CLAUDE.md` or project settings
-- connecting or disconnecting an MCP server
-- changing the tool set
+- **switching models** - each model has its own cache, so the next request
+  re-reads the whole conversation even though the content is identical
+- **changing the effort level** - on most models each effort level has its own
+  cache too. This one matters here because dropping effort is the saving this
+  plugin recommends most often. It is still worth doing, but it is not free
+  mid-session: on a large context the one-off rebuild can cost more than a few
+  cheaper turns save. Choose effort at the START of a session where you can
+- **turning on fast mode** - it adds a request header that is part of the cache key
+- **connecting or disconnecting an MCP server, but only when its tools sit in
+  the prefix.** With tool search - the default on supported models - a server
+  connecting, disconnecting or changing its tool list only appends, and the
+  cached prefix survives
+- **enabling or disabling a plugin that provides MCP servers**, by the same
+  rule. A plugin ships skills, commands, agents and hooks by appending them,
+  and those never invalidate anything
+- **adding or removing a bare tool-name deny rule** (`Bash`, `WebFetch`), which
+  takes the tool out of the system prompt. Scoped rules like `Bash(rm *)` do not
+- **compacting**, by design, and **upgrading Claude Code**
 
-None of these are forbidden. Just do them at a session boundary instead of in
-the middle of a long run.
+What does NOT invalidate it, despite being widely believed to:
+
+- **editing `CLAUDE.md` mid-session.** It is read once at session start and held
+  in memory. The edit does not invalidate the cache - and it also does not
+  apply, until `/clear`, `/compact` or a restart
+- editing files in the repository, changing permission mode, changing output
+  style, invoking a skill or command, and `/recap`
+
+None of the invalidating ones are forbidden. Just do them at a session boundary
+instead of in the middle of a long run.
+
+**`/rewind` rather than `/compact`** when abandoning a path: it truncates back to
+a prefix that is already cached, where compaction builds a new one and pays a
+summarisation call to do it.
+
+**Cache scope is one machine and one directory.** Parallel sessions in the same
+directory read each other cache; different directories do not - and that
+includes two worktrees of the same repository, which is a real and unobvious
+cost of isolating agents that way.
 
 ### 6. Batch tool calls
 

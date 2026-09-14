@@ -3,8 +3,22 @@
     "PreInvocation": [
       {
         "type": "command",
-        "command": "node ./skills/usage-limits/scripts/brief.js --host gemini",
+        "command": "node ./skills/usage-limits/scripts/agy-hook.js --event PreInvocation",
         "timeout": 10
+      }
+    ]
+  },
+  "usage-limits-ceiling": {
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ./skills/usage-limits/scripts/agy-hook.js --event PreToolUse",
+            "timeout": 10
+          }
+        ]
       }
     ]
   }

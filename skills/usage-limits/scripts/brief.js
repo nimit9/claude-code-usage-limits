@@ -74,6 +74,12 @@ const SCAN_BUDGET_MS = 5000;
 // registration is about a second and the hook is allowed ten.
 const ARM_DEADLINE_MS = 5000;
 
+// How old the account snapshot may be before the figure built on it is called
+// a floor rather than a reading. The refresh cadence is three minutes, so a
+// snapshot this old means several refreshes in a row failed or were throttled,
+// and by then the correction is carrying the number rather than adjusting it.
+const SNAPSHOT_TRUST_MS = 15 * 60 * 1000;
+
 // Past this much of a per-model week, say how to free it. Below it the advice
 // is noise: there is room, and the model in use is the right one.
 const HALF_SPENT = 50;
@@ -573,6 +579,29 @@ function briefText(input) {
         parts.snapshotAge + ' old and about ' + count(parts.pointsBeyondSnapshot, 'point') +
         ' have been spent since, more than it said was left. Either the window is ' +
         'already exhausted or the snapshot is wrong; /usage refreshes it.'
+    );
+  } else if (parts.snapshotStale) {
+    // The other way the figure goes wrong, and the one that actually happened.
+    //
+    // correctionUnreliable only fires when the measured spend EXCEEDS what the
+    // snapshot said was left, so a snapshot taken at the very start of a window
+    // can never trip it: everything spent since is still inside the remainder.
+    // On 2026-09-13 that combination reported 7 per cent for most of a session
+    // in which the account was at 41 - Claude Code's own cache had not moved in
+    // 50 minutes, the plugin's live reading was rate-limited into backoff, and
+    // the correction was quietly carrying the entire difference on its own.
+    //
+    // A correction is a measurement of local transcripts priced by a learned
+    // rate. It is a good adjustment to a recent snapshot and a bad substitute
+    // for an old one, because the pricing error compounds with every point it
+    // has to bridge. So an old snapshot makes the figure a floor, whether or
+    // not it has overrun anything, and that is said rather than assumed.
+    sentences.push(
+      'Treat that percentage as a floor rather than a reading: the account snapshot ' +
+        'behind it is ' + parts.snapshotAge + ' old, so most of the figure is measured ' +
+        'from local history at a learned price rather than read from the account, and ' +
+        'that gap widens the longer the snapshot stands. Run /usage to refresh it before ' +
+        'making a decision that depends on the exact number.'
     );
   }
   // Work having actually been stopped is the most useful thing that can be said
@@ -1289,6 +1318,7 @@ async function run(now, hookInput) {
         resetsIn: Number.isFinite(w.msToReset) ? usage.formatDuration(w.msToReset) : 'an unknown time',
       })),
       snapshotAge: usage.formatDuration(data.snapshotAgeMs),
+      snapshotAgeMs: Number.isFinite(data.snapshotAgeMs) ? data.snapshotAgeMs : null,
       binding: cacheableBinding(binding),
       effortWarning: data.effortWarning || null,
       // From the per-effort TABLE, which is what report() returns. It was
@@ -1429,6 +1459,7 @@ async function run(now, hookInput) {
     correctionUnreliable: Boolean(binding && binding.correctionUnreliable),
     pointsBeyondSnapshot: (binding && binding.pointsBeyondSnapshot) || 0,
     snapshotAge: view.snapshotAge,
+    snapshotStale: Number.isFinite(view.snapshotAgeMs) && view.snapshotAgeMs >= SNAPSHOT_TRUST_MS,
     // The turn count that matters for this session is its share of a shared
     // budget, not the whole window's. Escalating on the whole window meant a
     // count that looked comfortable while the part actually available here was
@@ -1481,6 +1512,7 @@ module.exports = {
   codexSummary,
   tallyContext,
   LARGE_CONTEXT_TOKENS,
+  SNAPSHOT_TRUST_MS,
   settings,
   keepSlots,
   pickCached,

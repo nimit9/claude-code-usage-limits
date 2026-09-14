@@ -606,12 +606,74 @@ function calibrate(events, key, now) {
   return { usdPerPercent: cost / moved, turns, percent: Math.round(last.percent) };
 }
 
+function limitIdOf(meter) {
+  return meter && typeof meter.limit_id === 'string' ? meter.limit_id : '';
+}
+
+// Whether this payload is a reading of a rolling window at all.
+//
+// Percentages count, and so does Codex saying outright that the window is
+// spent: at a limit hit the slots can come back null with
+// `rate_limit_reached_type` set, and that payload is the truest description of
+// the window there is. Skipping it for an older one that still had numbers
+// would report a window as running when it has already stopped.
+function carriesWindows(meter) {
+  if (!meter || typeof meter !== 'object') return false;
+  if (readingsOf(meter).length) return true;
+  return typeof meter.rate_limit_reached_type === 'string' && meter.rate_limit_reached_type !== '';
+}
+
+// Codex writes more than one meter, and they are not successive readings of one
+// thing. A Plus rollout carries `limit_id: "codex"`, which holds the 5-hour and
+// weekly windows, interleaved with `limit_id: "premium"`, which holds the credit
+// balance and has `primary` and `secondary` set to null.
+//
+// Taking whichever was written last therefore threw the windows away whenever a
+// `premium` payload happened to land last, which on this machine was two of
+// every six rollouts - and the report went blind at exactly the moment it was
+// wanted. On 2026-09-07 the final line of a rollout was a `premium` payload two
+// lines after a `codex` payload reading 99 per cent of the 5-hour window, and
+// what reached the agent was a meter with no windows in it at all. That is the
+// whole of "Codex does not slow down when the limit is close": nothing ever
+// told it the limit was close.
+//
+// So the newest reading of EACH meter is kept, and the one that actually
+// describes a window wins. Nothing is merged and nothing is synthesised: the
+// payload returned is one Codex really wrote, and `at` is when it wrote it, so
+// a stale reading still ages honestly.
+function pickMeter(candidates) {
+  const newestBy = new Map();
+  let newest = null;
+  for (const entry of candidates || []) {
+    if (!entry || !entry.meter || !Number.isFinite(entry.at)) continue;
+    if (!newest || entry.at > newest.at) newest = entry;
+    const id = limitIdOf(entry.meter);
+    const held = newestBy.get(id);
+    if (!held || entry.at > held.at) newestBy.set(id, entry);
+  }
+  let best = null;
+  for (const entry of newestBy.values()) {
+    if (!carriesWindows(entry.meter)) continue;
+    if (!best || entry.at > best.at) best = entry;
+  }
+  // No meter describes a window: that is a real answer too, and the newest
+  // payload is the one that should say it. utilizationFrom then reports it as
+  // unreadable or windowless exactly as before.
+  return best || newest;
+}
+
 // The newest meter reading in the rollouts, and when it was taken.
 function latestMeter(events) {
+  const candidates = [];
   for (let index = events.length - 1; index >= 0; index -= 1) {
-    if (events[index].meter) return { meter: events[index].meter, at: events[index].at };
+    const event = events[index];
+    if (!event || !event.meter) continue;
+    candidates.push({ meter: event.meter, at: event.at });
+    // Newest first, so the first payload that describes a window is the newest
+    // one that does and nothing older can beat it.
+    if (carriesWindows(event.meter)) break;
   }
-  return null;
+  return pickMeter(candidates);
 }
 
 // The meter is written next to every request, so the newest one is always near
@@ -664,6 +726,7 @@ function meterFromLines(text, partial) {
   // The first line of a tail is a fragment of whatever it landed in the middle
   // of, so it is never parsed.
   const floor = partial ? 1 : 0;
+  const candidates = [];
   for (let index = lines.length - 1; index >= floor; index -= 1) {
     const line = lines[index];
     if (!line || line.indexOf('"token_count"') === -1) continue;
@@ -675,22 +738,37 @@ function meterFromLines(text, partial) {
     }
     const meter = parsed && parsed.payload && parsed.payload.rate_limits;
     const at = Date.parse(parsed && parsed.timestamp);
-    if (meter && Number.isFinite(at)) return { meter, at };
+    if (!meter || !Number.isFinite(at)) continue;
+    candidates.push({ meter, at });
+    // Walking backwards, so the first payload that describes a window is the
+    // newest one that does. Stopping there keeps the common case at a handful
+    // of parsed lines rather than the whole tail, which matters on the status
+    // line path.
+    if (carriesWindows(meter)) break;
   }
-  return null;
+  return pickMeter(candidates);
 }
 
 // Scanning only the newest few rollouts, for the meter alone. `collect` runs on
 // the status-line path where a full scan would be far too slow.
+//
+// A rollout whose tail holds only the credit meter is not a reason to stop: the
+// windows are in an older one, and reporting nothing when they are three
+// seconds away on disk is the blindness this whole path exists to avoid. The
+// newest windowless reading is still kept, so an account that genuinely has no
+// rolling window says so instead of saying nothing.
 function meterFromDisk() {
   const files = rolloutFiles(NaN).slice(-12).reverse();
+  let fallback = null;
   for (const entry of files) {
     const tail = readTail(entry.file, TAIL_BYTES);
     if (!tail) continue;
     const found = meterFromLines(tail.text, tail.partial);
-    if (found) return found;
+    if (!found) continue;
+    if (carriesWindows(found.meter)) return found;
+    if (!fallback || found.at > fallback.at) fallback = found;
   }
-  return null;
+  return fallback;
 }
 
 // Where a live reading taken by refreshIfStale() is kept, so the hooks and the
@@ -1013,6 +1091,9 @@ module.exports = {
   utilizationFrom,
   labelFor,
   planFrom,
+  limitIdOf,
+  carriesWindows,
+  pickMeter,
   latestMeter,
   meterFromDisk,
   readTail,

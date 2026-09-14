@@ -2684,39 +2684,67 @@ function snapshotWindows(collected, now, codexHome) {
   return [...byKey.values()];
 }
 
+// Antigravity, and the `agy` CLI behind it.
+//
+// This one is mostly a list of things that are NOT known, and that is the
+// honest shape of it. Antigravity refreshes its quota - its own log says
+// `quota_manager.go: doRefreshQuota: starting reload` - but it writes the
+// answer nowhere this can read. Its on-disk state is a protobuf text state
+// file, per-conversation SQLite databases and a settings file holding
+// agentMode, artifactReviewPolicy, colorScheme and trustedWorkspaces. There is
+// no percentage, no window and no reset time anywhere in it.
+//
+// An earlier version of this function filled that gap by reading CLAUDE's
+// meter and reporting it under a `cross-agent-claude` source, alongside a
+// hardcoded "Google AI Plus" plan and a made-up model of "Gemini 3.8 Flash
+// (High)" for a settings file that has no model key in it at all. Every one of
+// those numbers was about a different account, a different product and a
+// different budget. A plugin whose entire purpose is to be right about a
+// number must not invent one, so all of it is gone: where there is nothing to
+// read this returns null and the report says the quota is unreadable.
+//
+// What IS readable is worth having, because it is what a person can act on:
+// the agent mode, and whether the artifact review policy is set to wave
+// everything through. Both come from the real file.
 function collectGemini(now) {
-  let claudeSnapshot = null;
-  try {
-    const claudeFile = host.claudeSnapshotFile();
-    if (claudeFile) {
-      const parsed = readJson(claudeFile);
-      if (parsed && parsed.cachedUsageUtilization) {
-        claudeSnapshot = parsed.cachedUsageUtilization;
-      }
-    }
-  } catch (err) {}
-
   const settingsFile = path.join(host.geminiConfigDir(), 'antigravity-cli', 'settings.json');
   const settings = readJson(settingsFile) || {};
+  const configFile = path.join(host.geminiConfigDir(), 'config', 'config.json');
+  const config = readJson(configFile) || {};
+  const userSettings = (config && config.userSettings) || {};
 
-  const utilization = claudeSnapshot && claudeSnapshot.utilization ? claudeSnapshot.utilization : null;
   return {
     now,
     host: host.GEMINI,
     money: false,
     accountFile: settingsFile,
-    plan: 'Google AI Plus',
-    planId: 'google_ai_plus',
-    planTier: 'google_ai_plus',
-    planAdvice: 'Google AI Plus plan with Gemini 2.5 Flash / Gemini 3.x Flash & Pro models.',
-    snapshotAgeMs: claudeSnapshot && claudeSnapshot.fetchedAtMs ? now - claudeSnapshot.fetchedAtMs : null,
-    snapshotFetchedAt: claudeSnapshot && claudeSnapshot.fetchedAtMs ? claudeSnapshot.fetchedAtMs : null,
-    snapshotSource: utilization ? 'cross-agent-claude' : null,
-    utilization,
+    // The plan is not on disk either. Naming one would be the same mistake in
+    // a smaller font.
+    plan: 'unknown',
+    planId: 'gemini_unknown',
+    planTier: null,
+    planAdvice:
+      'Antigravity does not publish remaining quota anywhere readable on disk, so this ' +
+      'plugin cannot report a percentage for it. Its own /usage command is the only place ' +
+      'the figure appears. What is enforced here instead is the ceiling: past it, fan-out ' +
+      'calls are refused, which is the largest single saving available without a meter.',
+    snapshotAgeMs: null,
+    snapshotFetchedAt: null,
+    snapshotSource: null,
+    // Not "zero used". Unknown.
+    utilization: null,
+    // Said outright so the report can distinguish "no quota system" from
+    // "quota system this cannot read". It is the second one.
+    quotaUnreadable: true,
     settings: {
-      model: settings.model || 'Gemini 3.8 Flash (High)',
-      effortLevel: settings.effortLevel || 'high',
-      agentMode: settings.agentMode || 'accept-edits',
+      // Only keys that exist in the real file. Antigravity chooses its model
+      // per conversation and records it in a protobuf state file as an opaque
+      // placeholder id, so there is no model name to report.
+      model: 'unknown',
+      effortLevel: 'unknown',
+      agentMode: settings.agentMode || 'unknown',
+      artifactReviewPolicy: settings.artifactReviewPolicy || null,
+      autoExecutionPolicy: userSettings.autoExecutionPolicy || null,
     },
     extraUsage: null,
   };

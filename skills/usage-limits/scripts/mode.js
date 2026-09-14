@@ -384,6 +384,10 @@ function empty() {
     mode: DEFAULT_MODE,
     auto: false,
     guardPercent: null,
+    // The ceiling is the only setting here that is ENFORCED rather than
+    // reported: past it, fan-out calls are refused at the hook. Null means no
+    // ceiling, and a ceiling nobody set never refuses anything. See ceiling.js.
+    ceilingPercent: null,
     setAt: null,
     setBy: null,
     session: null,
@@ -425,6 +429,12 @@ function read() {
   if (named && named.mode) base.mode = named.mode;
   base.auto = parsed.auto === true;
   base.guardPercent = Number.isFinite(parsed.guardPercent) ? parsed.guardPercent : null;
+  // Anything outside 1-100 is not a ceiling, and enforcing a number that was
+  // never a percentage would refuse work over a typo.
+  base.ceilingPercent =
+    Number.isFinite(parsed.ceilingPercent) && parsed.ceilingPercent > 0 && parsed.ceilingPercent <= 100
+      ? parsed.ceilingPercent
+      : null;
   base.setAt = Number.isFinite(parsed.setAt) ? parsed.setAt : null;
   base.setBy = typeof parsed.setBy === 'string' ? parsed.setBy : null;
   if (parsed.session && typeof parsed.session === 'object' && parsed.session.id) {
@@ -600,6 +610,7 @@ function resolve(options) {
     auto,
     policy,
     guardPercent: state.guardPercent,
+    ceilingPercent: state.ceilingPercent,
     bounds: { floor: state.floor, ceiling: state.ceiling, pin: state.pin === true },
     advice: state.advice,
     state,
@@ -622,6 +633,7 @@ function forSession(options) {
       auto: false,
       policy,
       guardPercent: null,
+      ceilingPercent: null,
       bounds: { floor: null, ceiling: null, pin: false },
       advice: { off: false, declined: {}, offered: {} },
       state: empty(),
@@ -1228,6 +1240,7 @@ function setMode(name, opts, now) {
   state.setAt = at;
   state.setBy = 'user';
   if (opts && Number.isFinite(opts.guard)) state.guardPercent = opts.guard;
+  if (opts && Number.isFinite(opts.ceiling)) state.ceilingPercent = opts.ceiling;
   write(state);
   logChange({ plane: 'mode', key: 'mode', from: before, to: name, by: 'user', reason: null }, at);
 
@@ -1424,15 +1437,98 @@ function main(argv) {
     if (named.auto) return main(['auto'].concat(args.slice(1)));
     const guard = guardValue(args, flag, value);
     if (guard.error) return guard.error;
-    return [setMode(named.mode, {
+    const ceilingArg = ceilingValue(args, flag, value);
+    if (ceilingArg.error) return ceilingArg.error;
+    const set = setMode(named.mode, {
       session: flag('--session'),
       sessionId,
       guard: guard.percent,
-    }, now)].concat(boundLines).join('\n');
+      ceiling: ceilingArg.percent,
+    }, now);
+    if (ceilingArg.clear) clearCeiling(now);
+    const lines = [set];
+    if (ceilingArg.percent !== undefined || ceilingArg.clear) lines.push(ceilingLine());
+    return lines.concat(boundLines).join('\n');
+  }
+
+  // The usage cap on its own, without changing the mode.
+  //
+  // Spelled --cap, NOT --ceiling: this file already uses --ceiling for the
+  // model/effort bound ("never go above opus/xhigh"), and taking that spelling
+  // swallowed it - mode --ceiling opus/xhigh started answering "could not read a
+  // percentage". The two are unrelated
+  // settings: the mode says how loudly the plugin talks, the ceiling says where
+  // it stops the work.
+  if (flag('--cap')) {
+    const ceilingArg = ceilingValue(args, flag, value);
+    if (ceilingArg.error) return ceilingArg.error;
+    const state = read();
+    const previous = state.ceilingPercent;
+    state.ceilingPercent = ceilingArg.clear ? null : ceilingArg.percent;
+    write(state);
+    logChange(
+      { plane: 'mode', key: 'ceiling', from: previous, to: state.ceilingPercent, by: 'user', reason: null },
+      now
+    );
+    return ceilingLine();
   }
 
   if (boundLines.length) return boundLines.join('\n');
   return describe(decided, now);
+}
+
+function clearCeiling(now) {
+  const state = read();
+  const previous = state.ceilingPercent;
+  state.ceilingPercent = null;
+  write(state);
+  logChange({ plane: 'mode', key: 'ceiling', from: previous, to: null, by: 'user', reason: null }, now);
+}
+
+// What the ceiling is now, and what it will actually do. Said in terms of the
+// refusal, because a percentage on its own does not tell anyone what changes.
+function ceilingLine() {
+  const state = read();
+  if (state.ceilingPercent === null || state.ceilingPercent === undefined) {
+    return 'Ceiling off. Nothing is refused; the plugin reports and does not intervene.';
+  }
+  return (
+    'Ceiling ' + state.ceilingPercent + '%. Past that, fan-out calls (Agent, Task, Workflow and ' +
+    'their equivalents) are refused at the hook, in every session on this machine. Nothing else ' +
+    'is blocked, so the work still finishes - sequentially, in one session, which is where the ' +
+    'saving comes from. "mode --cap off" removes it.'
+  );
+}
+
+// The ceiling percentage, or the reason it was refused. Same validation as the
+// guard, and for the same reason: a number accepted without being read is a
+// setting that silently does the opposite of what was asked.
+//
+// A ceiling differs from the guard in one way - "off" is a meaningful value,
+// because a ceiling is the one setting here that takes something away, and
+// taking it back has to be as easy as setting it.
+function ceilingValue(args, flag, value) {
+  if (!flag('--cap')) return { percent: undefined, clear: false };
+  const token = value('--cap');
+  if (token === null) {
+    return { error: '--cap needs a percentage or "off", for example: mode --cap 60' };
+  }
+  const text = String(token).trim().toLowerCase();
+  if (text === 'off' || text === 'none' || text === 'no') return { percent: undefined, clear: true };
+  const raw = Number(text.replace(/%$/, ''));
+  if (!Number.isFinite(raw)) {
+    return { error: 'Could not read a percentage from "' + token + '". Try: mode --cap 60' };
+  }
+  if (raw < 1 || raw > 100) {
+    return {
+      error:
+        'The ceiling is a percentage of a window, so it has to be between 1 and 100. ' +
+        (raw > 100
+          ? String(raw) + ' can never be reached, so nothing would ever be refused.'
+          : String(raw) + ' would refuse every fan-out from the start of the window.'),
+    };
+  }
+  return { percent: raw, clear: false };
 }
 
 // The guard percentage, or the reason it was refused.

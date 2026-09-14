@@ -61,6 +61,8 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--dry-run') args.dryRun = true;
+    // Codex only: leave the [agents] subagent clamp alone.
+    else if (arg === '--no-agents') args.agents = false;
     else if (arg === '--host') args.host = argv[++i];
     else if (arg.startsWith('--host=')) args.host = arg.slice(7);
     else if (arg === '--effort') args.effort = argv[++i];
