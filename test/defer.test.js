@@ -169,10 +169,21 @@ test('cancel records a readable outcome, not an object', () => {
 });
 
 test('relay.arm honours an exact wake time', () => {
+  // ISOLATED, and it must be. Without this the test armed against the REAL
+  // config: on 2026-09-14 it displaced another session's live relay seven
+  // seconds after that relay was armed, and the cleanup disarm then cleared a
+  // record that was no longer ours. arm() displaces by design - one machine,
+  // one relay - so anything that arms a throwaway session has to isolate.
   // A deferral fires at a time a person named, so arm() must NOT add the relay's
   // graceMinutes to it: 9:50 means 9:50. This is pinned because relay.js is
   // shared and the `at` option is easy to drop in a refactor.
   const relay = require('../skills/usage-limits/scripts/relay.js');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const savedDir = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-limits-arm-'));
+  try {
   const now = Date.now();
   const target = now + 90 * MINUTE;
 
@@ -197,5 +208,9 @@ test('relay.arm honours an exact wake time', () => {
     Math.abs(Number(record.wakeAt) - target) < 1000,
     'wakeAt ' + new Date(Number(record.wakeAt)).toISOString() + ' should equal the requested ' + new Date(target).toISOString()
   );
-  relay.disarm('test cleanup', Date.now());
+  relay.disarm('test cleanup', Date.now(), 'at-option-test');
+  } finally {
+    if (savedDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = savedDir;
+  }
 });
