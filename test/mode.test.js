@@ -1371,3 +1371,19 @@ test('the re-cost will not point below the bound the user set', async () => {
   assert.match(await drive(() => {}), /\/effort medium/, 'with no bound set it names the way out');
   assert.strictEqual(await drive(() => mode.main(['--floor', 'high'])), '', 'below the floor, it says nothing');
 });
+
+test('the tier line asks for a decision only when the tier is dear', () => {
+  // MODEL_ORDER runs CHEAPEST first (haiku, sonnet, opus, mythos, fable), so
+  // the dear end is a HIGH rank. The first version compared <= 1 and so asked
+  // haiku to justify itself while letting opus through silently - the exact
+  // inverse of the point, and invisible without this test because tierLine
+  // reads the live session tier rather than its arguments.
+  assert.equal(mode.topTier('opus', 'low'), true, 'opus is dear on its own');
+  assert.equal(mode.topTier('mythos', 'medium'), true);
+  assert.equal(mode.topTier('fable', 'low'), true);
+  assert.equal(mode.topTier('sonnet', 'xhigh'), true, 'xhigh is dear on its own');
+  assert.equal(mode.topTier('haiku', 'max'), true);
+  assert.equal(mode.topTier('haiku', 'low'), false, 'nothing to decide here');
+  assert.equal(mode.topTier('sonnet', 'medium'), false);
+  assert.equal(mode.topTier(null, null), false, 'an unknown tier is not a prompt');
+});

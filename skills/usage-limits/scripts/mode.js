@@ -1112,10 +1112,44 @@ function tierLine(tier, options) {
   if (opts.terse) {
     return differs ? runningText + source + ', yours ' + baseText : runningText + source;
   }
+  // Reporting the tier is not the same as deciding about it.
+  //
+  // This line has always said what is running and left it there, and the
+  // observed result is that the tier is simply never revisited: a session opens
+  // on the dearest model at the dearest effort and stays there through work
+  // that did not need either. Saying the number is not a prompt to act on it.
+  //
+  // So when the tier IS an expensive one, the line asks for a decision rather
+  // than leaving a fact lying around. Only then: on a cheap tier there is
+  // nothing to decide, and a sentence asking every turn would be exactly the
+  // per-turn cost this plugin exists to avoid.
+  //
+  // Deliberately names no slash command. /model and /effort do not exist in
+  // Codex, and telling Codex to run them is telling it to do nothing while
+  // believing it acted - the mistake levers() already exists to prevent.
+  const dear = topTier(run.model || base.model, run.effort || base.effort);
+  const decide = dear
+    ? ' Decide in one line whether the work in front of you needs ' + runningText +
+      ', and step down through your own controls if it does not.'
+    : '';
   return differs
     ? 'Running ' + runningText + source + '; your baseline is ' + baseText + '. The gap is the ' +
-      'interesting part: your baseline is yours and is not being changed.'
-    : 'Running ' + runningText + source + '.';
+      'interesting part: your baseline is yours and is not being changed.' + decide
+    : 'Running ' + runningText + source + '.' + decide;
+}
+
+// Whether this tier is dear enough to be worth a decision. Opus or above, or an
+// effort at or above xhigh; either alone is enough to be worth asking.
+//
+// MODEL_ORDER runs CHEAPEST first - haiku, sonnet, opus, mythos, fable - so the
+// dear end is a HIGH rank, not a low one. Getting that backwards asked haiku to
+// justify itself and let opus through silently, which is the exact inverse of
+// the point.
+function topTier(model, effort) {
+  const rank = modelRank(model);
+  const dearModel = rank !== null && rank >= MODEL_ORDER.indexOf('opus');
+  const dearEffort = ['xhigh', 'max', 'ultra', 'ultracode'].includes(String(effort || '').toLowerCase());
+  return dearModel || dearEffort;
 }
 
 // ---------------------------------------------------------------------------
@@ -1659,6 +1693,7 @@ module.exports = {
   adviceDecline,
   adviceMute,
   tierNow,
+  topTier,
   tierLine,
   ledger,
   explain,
