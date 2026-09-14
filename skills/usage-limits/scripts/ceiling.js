@@ -64,10 +64,22 @@ function isMultiplier(tool) {
   return MULTIPLIER_PATTERN.test(name);
 }
 
-// The number, and who set it. An explicit environment value is the user saying
-// it outright for this one session and beats the file, the same precedence the
-// mode uses.
-function ceilingFrom(state, env) {
+// The number, and who set it.
+//
+// A cap belongs to THE SESSION THAT SET IT, and this is the whole of the fix
+// for it outliving one. "Do not spend past 65 per cent" is a thing somebody
+// says about the work in front of them; carrying it into tomorrow's session
+// means refusing fan-outs on a fresh window for a reason nobody remembers
+// giving. It was reported exactly that way: the session restarted and the cap
+// was still being enforced.
+//
+// So the stored cap carries the session id it was set in, and applies only
+// there. A cap with no session recorded is a cap from before this rule existed
+// - it is ignored rather than honoured, because honouring it is the bug.
+//
+// An explicit environment value is different: it is the user saying it outright
+// for this one process, so it beats the file and needs no session.
+function ceilingFrom(state, env, sessionId) {
   const environment = env || process.env;
   const raw = environment.USAGE_LIMITS_CEILING;
   if (raw !== undefined && raw !== null && String(raw).trim() !== '') {
@@ -81,8 +93,16 @@ function ceilingFrom(state, env) {
     // the file rather than enforcing a number nobody typed.
   }
   const stored = state && Number.isFinite(state.ceilingPercent) ? state.ceilingPercent : null;
-  if (stored !== null && stored > 0 && stored <= 100) return { percent: stored, source: 'the file' };
-  return { percent: null, source: null };
+  if (stored === null || stored <= 0 || stored > 100) return { percent: null, source: null };
+  const owner = state && state.ceilingSession ? String(state.ceilingSession) : null;
+  if (!owner) {
+    // Set before caps were session-scoped. Not this session's instruction.
+    return { percent: null, source: null, staleCap: stored };
+  }
+  if (!sessionId || String(sessionId) !== owner) {
+    return { percent: null, source: null, otherSessionCap: stored };
+  }
+  return { percent: stored, source: 'this session' };
 }
 
 // Where the binding window stands against the ceiling.
@@ -92,7 +112,7 @@ function ceilingFrom(state, env) {
 // the same mistake the brief was corrected for.
 function assess(options) {
   const opts = options || {};
-  const ceiling = ceilingFrom(opts.state, opts.env);
+  const ceiling = ceilingFrom(opts.state, opts.env, opts.sessionId);
   const percent = Number.isFinite(opts.percent) ? opts.percent : null;
   if (ceiling.percent === null || percent === null) {
     return {
@@ -103,6 +123,8 @@ function assess(options) {
       over: false,
       near: false,
       headroomPoints: null,
+      staleCap: ceiling.staleCap || null,
+      otherSessionCap: ceiling.otherSessionCap || null,
     };
   }
   const headroomPoints = ceiling.percent - percent;

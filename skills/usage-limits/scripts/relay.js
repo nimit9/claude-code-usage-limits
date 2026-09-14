@@ -521,8 +521,27 @@ function wakeAt(resetsAt, graceMinutes, now) {
   return Math.max(at, floor);
 }
 
-function taskName(id) {
-  return 'UsageLimitsRelay-' + String(id).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
+// One name per WAKE, not one per session.
+//
+// Reusing a name entangles every registration with the previous one's fate,
+// and all of it is undocumented: whether -Force truly replaces a stale
+// definition, what happens when a name is re-registered while its predecessor
+// is pending expiry-deletion, and whether an old EndBoundary survives the
+// update. On top of that MultipleInstances defaults to IgnoreNew, so a
+// previous run still held open by the four-hour execution limit silently
+// swallows the next launch.
+//
+// A unique suffix removes all of it at once, and lets DeleteExpiredTaskAfter
+// do what it should: each fired wake garbage-collects itself. cancelSchedule
+// works off the stored name, so nothing downstream changes.
+function taskName(id, at) {
+  const stamp = Number.isFinite(at) ? at : Date.now();
+  return (
+    'UsageLimitsRelay-' +
+    String(id).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) +
+    '-' +
+    stamp.toString(36)
+  );
 }
 
 function psQuote(value) {
@@ -574,7 +593,45 @@ function remainingMs(deadline, ceiling) {
   return Math.max(0, Math.min(ceiling, left));
 }
 
+// Does Windows agree that this task will run?
+//
+// `state` and `next` come straight from Get-ScheduledTask and
+// Get-ScheduledTaskInfo. A task can register cleanly and still never fire,
+// and each of these has been seen: Disabled by policy or by an earlier
+// failure; NextRunTime empty because the trigger time had already passed by
+// the time it was written; NextRunTime set to something other than what was
+// asked for, meaning the trigger did not take. None of them raised an error
+// before, so the relay reported an armed wake and nothing happened.
+function verifyRegistration(state, next, wanted, now) {
+  const said = String(state || '').trim();
+  if (/disabled/i.test(said)) {
+    return { ok: false, error: 'the scheduled task registered but is Disabled, so it will not run' };
+  }
+  const text = String(next || '').trim();
+  if (!text) {
+    return { ok: false, error: 'the scheduled task registered but Windows reports no next run time, so it will not fire' };
+  }
+  const at = Date.parse(text);
+  if (!Number.isFinite(at)) {
+    return { ok: false, error: 'could not read the next run time Windows reported: ' + text };
+  }
+  if (at <= now) {
+    return { ok: false, error: 'the scheduled task next run time is already in the past' };
+  }
+  // Five minutes of slack: Task Scheduler rounds to the minute and a trigger
+  // can be nudged. Anything further out is a different time from the one asked
+  // for, which means the trigger did not take.
+  if (Number.isFinite(wanted) && Math.abs(at - wanted) > 5 * 60 * 1000) {
+    return {
+      ok: false,
+      error: 'the scheduled task is set for ' + new Date(at).toISOString() + ', not the requested ' + new Date(wanted).toISOString(),
+    };
+  }
+  return { ok: true, nextRun: at };
+}
+
 function scheduleWindows(when, argv, name, cwd, deadline) {
+  let lastVerifyError = null;
   const date = new Date(when);
   const stamp =
     date.getFullYear() + '-' + two(date.getMonth() + 1) + '-' + two(date.getDate()) + ' ' +
@@ -589,12 +646,33 @@ function scheduleWindows(when, argv, name, cwd, deadline) {
     // leaves a dead entry in Task Scheduler forever; the wake also unregisters
     // itself when it finishes, and this is what catches the wakes that never
     // get to run at all.
-    '$trigger.EndBoundary = (Get-Date ' + psQuote(stamp) + ').AddHours(12).ToString("s")',
+    // "zzz" is load-bearing. EndBoundary is documented as
+    // YYYY-MM-DDTHH:MM:SS(+-)HH:MM, and .ToString("s") emits no offset at
+    // all. A boundary written without one can be read as UTC, which west of
+    // Greenwich puts it HOURS IN THE PAST - so the task is born expired,
+    // never fires, and DeleteExpiredTaskAfter quietly reaps it. None of that
+    // raises an error: registration returns SCHED_S_SOME_TRIGGERS_FAILED
+    // (0x0004131B), which is a SUCCESS code, so PowerShell never throws and
+    // the relay reported a wake that could not happen.
+    '$trigger.EndBoundary = (Get-Date ' + psQuote(stamp) + ').AddHours(12).ToString("yyyy-MM-ddTHH:mm:sszzz")',
     '$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun -AllowStartIfOnBatteries ' +
       '-DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 4) ' +
       '-DeleteExpiredTaskAfter (New-TimeSpan -Minutes 10)',
     'Register-ScheduledTask -TaskName ' + psQuote(name) + ' -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null',
-    'Write-Output "registered"',
+    // Ask Windows whether it will actually fire, rather than trusting that a
+    // registration which did not throw is a wake that will happen.
+    //
+    // This is the difference between "it said it would restart at 4:30 and
+    // nothing happened" and an error at arming time. Register-ScheduledTask
+    // reports success for a task that will never run: a trigger already in the
+    // past, a task left Disabled, a name whose previous registration is still
+    // being torn down. NextRunTime is the only field that answers the question
+    // actually being asked.
+    '$info = Get-ScheduledTaskInfo -TaskName ' + psQuote(name) + ' -ErrorAction SilentlyContinue',
+    '$state = (Get-ScheduledTask -TaskName ' + psQuote(name) + ' -ErrorAction SilentlyContinue).State',
+    '$next = ""',
+    'if ($info -and $info.NextRunTime) { $next = $info.NextRunTime.ToString("s") }',
+    'Write-Output ("registered|" + $state + "|" + $next)',
   ].join('\n');
   const file = path.join(os.tmpdir(), name + '.ps1');
   try {
@@ -604,7 +682,14 @@ function scheduleWindows(when, argv, name, cwd, deadline) {
       windowsHide: true,
       timeout: Math.max(500, remainingMs(deadline, 8000)),
     });
-    if (run.status === 0 && /registered/.test(run.stdout || '')) return { ok: true, how: 'ScheduledTasks' };
+    const registered = (run.stdout || '').match(/registered\|([^|\r\n]*)\|([^\r\n]*)/);
+    if (run.status === 0 && registered) {
+      const verdict = verifyRegistration(registered[1], registered[2], when, Date.now());
+      if (verdict.ok) return { ok: true, how: 'ScheduledTasks', nextRun: verdict.nextRun };
+      // Registered but it will not fire. Fall through to schtasks rather than
+      // reporting a wake that is not going to happen.
+      lastVerifyError = verdict.error;
+    }
     // No time left for a second attempt is a plain refusal, not a hung hook.
     if (remainingMs(deadline, 8000) < 1500) return { ok: false, error: 'no time left in this hook to register the wake; it will arm on the next prompt' };
     // schtasks cannot express StartWhenAvailable, so this path is a worse
@@ -618,7 +703,7 @@ function scheduleWindows(when, argv, name, cwd, deadline) {
       { encoding: 'utf8', windowsHide: true, timeout: Math.max(500, remainingMs(deadline, 8000)) }
     );
     if (fallback.status === 0) return { ok: true, how: 'schtasks', warning: 'a sleeping machine will miss this wake' };
-    return { ok: false, error: (run.stderr || fallback.stderr || 'could not register a scheduled task').trim().split('\n')[0] };
+    return { ok: false, error: (lastVerifyError || run.stderr || fallback.stderr || 'could not register a scheduled task').trim().split('\n')[0] };
   } catch (err) {
     return { ok: false, error: err.message };
   } finally {
@@ -725,7 +810,17 @@ function arm(input) {
 
   const state = read();
   const id = options.sessionId;
-  const name = taskName(id);
+  const name = taskName(id, when);
+  // Names are unique per wake now, so re-arming no longer replaces the old
+  // registration by name. Retire it explicitly, or every re-arm leaves a live
+  // task behind that would fire on its own.
+  if (state.armed && state.armed.task && state.armed.task !== name) {
+    try {
+      cancelSchedule(state.armed.task);
+    } catch (err) {
+      // The expiry removes it eventually either way.
+    }
+  }
   // Re-arming the same session for the same reset would register the task
   // twice; -Force replaces it, and the record is rewritten either way.
   const argv = [path.join(__dirname, 'wake.js'), '--id', id];
@@ -1234,6 +1329,7 @@ module.exports = {
   remainingMs,
   armByHand,
   schedule,
+  verifyRegistration,
   scheduleWindows,
   schedulePosix,
   cancelSchedule,

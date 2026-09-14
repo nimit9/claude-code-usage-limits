@@ -192,7 +192,7 @@ function describe(settings, state) {
 function logSettingsChange(changes, direction, env) {
   if (!changes || !changes.length) return;
   const e = env || process.env;
-  const by = e.CLAUDE_SESSION_ID || e.CODEX_SESSION_ID ? 'claude' : 'user';
+  const by = e.CLAUDE_CODE_SESSION_ID || e.CLAUDE_SESSION_ID || e.CODEX_SESSION_ID ? 'claude' : 'user';
   try {
     const mode = require('./mode.js');
     for (const change of changes) {

@@ -253,6 +253,8 @@ async function run(now, hookInput) {
         percent: ceilingPercent(now),
         state: budget.state,
         env: process.env,
+        // The cap only binds in the session that set it.
+        sessionId,
       });
       const call = ceiling.verdict(at, tool);
       if (call.decision === 'deny') return { deny: true, reason: call.reason };

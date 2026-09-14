@@ -274,8 +274,12 @@ test('arming a second session replaces the first', () =>
   }));
 
 test('task names and PowerShell strings cannot carry anything through', () => {
-  assert.strictEqual(relay.taskName('a b/c;d'), 'UsageLimitsRelay-abcd');
-  assert.strictEqual(relay.taskName("x'; Remove-Item C:\\ -Recurse #"), 'UsageLimitsRelay-xRemove-ItemC-Recurse');
+  // One name per WAKE: the sanitised id, then a base36 stamp of the wake time.
+  assert.strictEqual(relay.taskName('a b/c;d', 1789000000000), 'UsageLimitsRelay-abcd-mtuseqkg');
+  assert.strictEqual(relay.taskName("x'; Remove-Item C:\\ -Recurse #", 1789000000000), 'UsageLimitsRelay-xRemove-ItemC-Recurse-mtuseqkg');
+  // The stamp is the only part that varies, and it cannot carry anything
+  // either: it is base36 digits of a number.
+  assert.match(relay.taskName('anything', Date.now()), /^UsageLimitsRelay-anything-[0-9a-z]+$/);
   assert.strictEqual(relay.psQuote("it's"), "'it''s'");
   assert.strictEqual(relay.psQuote("'; whoami; '"), "'''; whoami; '''");
 });

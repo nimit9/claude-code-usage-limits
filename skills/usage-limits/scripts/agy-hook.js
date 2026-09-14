@@ -124,7 +124,7 @@ async function run(now, input, argv) {
   if (event === 'PreToolUse') {
     const tool = toolNameOf(input);
     if (!ceiling.isMultiplier(tool)) return {};
-    const at = ceiling.assess({ percent: percentNow(now), state: budget.state, env: process.env });
+    const at = ceiling.assess({ percent: percentNow(now), state: budget.state, env: process.env, sessionId });
     const call = ceiling.verdict(at, tool);
     if (call.decision !== 'deny') return {};
     return { decision: 'deny', reason: call.reason };
@@ -141,7 +141,7 @@ async function run(now, input, argv) {
       text = '';
     }
     const warning = ceiling.warning(
-      ceiling.assess({ percent: percentNow(now), state: budget.state, env: process.env })
+      ceiling.assess({ percent: percentNow(now), state: budget.state, env: process.env, sessionId })
     );
     const message = [text, warning].filter(Boolean).join(' ');
     return message ? { injectSteps: [{ ephemeralMessage: message }] } : { injectSteps: [] };

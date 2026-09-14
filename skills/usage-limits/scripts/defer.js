@@ -175,7 +175,7 @@ function bindingReset(now) {
 function sessionId(argv, env) {
   const at = argv.indexOf('--session-id');
   if (at !== -1 && argv[at + 1]) return argv[at + 1];
-  return env.CLAUDE_SESSION_ID || env.CODEX_SESSION_ID || 'defer-' + Date.now().toString(36);
+  return env.CLAUDE_CODE_SESSION_ID || env.CLAUDE_SESSION_ID || env.CODEX_SESSION_ID || 'defer-' + Date.now().toString(36);
 }
 
 function argOf(argv, name) {

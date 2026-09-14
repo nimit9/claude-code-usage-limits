@@ -388,6 +388,11 @@ function empty() {
     // reported: past it, fan-out calls are refused at the hook. Null means no
     // ceiling, and a ceiling nobody set never refuses anything. See ceiling.js.
     ceilingPercent: null,
+    // WHOSE cap it is. A cap is said about the work in front of someone, so
+    // it binds only in the session that set it; carrying it into the next one
+    // means refusing fan-outs on a fresh window for a reason nobody gave. A
+    // stored cap with no session here predates this rule and is ignored.
+    ceilingSession: null,
     setAt: null,
     setBy: null,
     session: null,
@@ -431,6 +436,7 @@ function read() {
   base.guardPercent = Number.isFinite(parsed.guardPercent) ? parsed.guardPercent : null;
   // Anything outside 1-100 is not a ceiling, and enforcing a number that was
   // never a percentage would refuse work over a typo.
+  base.ceilingSession = typeof parsed.ceilingSession === 'string' ? parsed.ceilingSession : null;
   base.ceilingPercent =
     Number.isFinite(parsed.ceilingPercent) && parsed.ceilingPercent > 0 && parsed.ceilingPercent <= 100
       ? parsed.ceilingPercent
@@ -1240,7 +1246,10 @@ function setMode(name, opts, now) {
   state.setAt = at;
   state.setBy = 'user';
   if (opts && Number.isFinite(opts.guard)) state.guardPercent = opts.guard;
-  if (opts && Number.isFinite(opts.ceiling)) state.ceilingPercent = opts.ceiling;
+  if (opts && Number.isFinite(opts.ceiling)) {
+    state.ceilingPercent = opts.ceiling;
+    state.ceilingSession = opts.sessionId || null;
+  }
   write(state);
   logChange({ plane: 'mode', key: 'mode', from: before, to: name, by: 'user', reason: null }, at);
 
@@ -1288,7 +1297,10 @@ function main(argv) {
     const next = args[at + 1];
     return next && next.indexOf('--') !== 0 ? next : null;
   };
-  const sessionId = value('--session-id') || process.env.CLAUDE_SESSION_ID || null;
+  // CLAUDE_CODE_SESSION_ID is the one Claude Code actually exports;
+  // CLAUDE_SESSION_ID never existed, so this read null and a cap set from the
+  // command line could record no owner and therefore never bind.
+  const sessionId = value('--session-id') || process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID || null;
   const decided = resolve({ sessionId });
 
   if (flag('--list')) return list(decided);
@@ -1465,6 +1477,7 @@ function main(argv) {
     const state = read();
     const previous = state.ceilingPercent;
     state.ceilingPercent = ceilingArg.clear ? null : ceilingArg.percent;
+    state.ceilingSession = ceilingArg.clear ? null : sessionId;
     write(state);
     logChange(
       { plane: 'mode', key: 'ceiling', from: previous, to: state.ceilingPercent, by: 'user', reason: null },
@@ -1481,6 +1494,7 @@ function clearCeiling(now) {
   const state = read();
   const previous = state.ceilingPercent;
   state.ceilingPercent = null;
+  state.ceilingSession = null;
   write(state);
   logChange({ plane: 'mode', key: 'ceiling', from: previous, to: null, by: 'user', reason: null }, now);
 }
@@ -1493,10 +1507,11 @@ function ceilingLine() {
     return 'Ceiling off. Nothing is refused; the plugin reports and does not intervene.';
   }
   return (
-    'Ceiling ' + state.ceilingPercent + '%. Past that, fan-out calls (Agent, Task, Workflow and ' +
-    'their equivalents) are refused at the hook, in every session on this machine. Nothing else ' +
+    'Cap ' + state.ceilingPercent + '%' + (state.ceilingSession ? ', for THIS session only' : ' (stored against no session, so it is ignored - set it again to apply it here)') +
+    '. Past that, fan-out calls (Agent, Task, Workflow and ' +
+    'their equivalents) are refused at the hook. Nothing else ' +
     'is blocked, so the work still finishes - sequentially, in one session, which is where the ' +
-    'saving comes from. "mode --cap off" removes it.'
+    'saving comes from. It lapses when this session ends; "mode --cap off" removes it now.'
   );
 }
 
