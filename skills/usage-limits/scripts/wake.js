@@ -143,8 +143,21 @@ function userIsPresent(cli) {
 // None of this is restored by --resume: a headless resume starts in the
 // permission mode a fresh -p run would, so a session that was running with
 // edits accepted comes back asking a person who is not there.
+// The prompt is NOT in here. It travels on stdin - see deliverClaude.
+//
+// It used to be the argument after -p, and on 2026-09-14 a relay booked for
+// 09:55 fired on time, three times, and died three times with the one line
+// "The command line is too long." The continuation had grown to 7.5 KB and
+// Windows caps a command line at 8,191 characters. Every retry hit the same
+// wall, because the failure was deterministic, and the work sat on disk until
+// somebody came home at 2:52 PM and found nothing done.
+//
+// claude -p reads the prompt from stdin when none is given as an argument and
+// stdin is not a terminal, with a 10 MB cap. A 12 KB prompt was fed through
+// that way and answered before this change was made. The prompt parameter is
+// kept in the signature so callers and tests do not change shape.
 function claudeArgs(record, prompt, config, fallback) {
-  const args = fallback ? ['--continue', '-p', prompt] : ['--resume', record.id, '-p', prompt];
+  const args = fallback ? ['--continue', '-p'] : ['--resume', record.id, '-p'];
   if (config.permissionMode) args.push('--permission-mode', config.permissionMode);
   // Nobody is awake to answer a prompt. Deny it rather than stall on it: a
   // resumed run that sits waiting for a keystroke burns its whole timeout and
@@ -186,7 +199,8 @@ function spawnOptionsFor(record, config, cli) {
 
 function deliverClaude(record, prompt, config, cli, runs) {
   const args = claudeArgs(record, prompt, config, false);
-  const options = spawnOptionsFor(record, config, cli);
+  // stdin, never argv. See claudeArgs for the 7.5 KB note that proved why.
+  const options = Object.assign(spawnOptionsFor(record, config, cli), { input: String(prompt == null ? '' : prompt) });
   const run = appendRun(runs, 'claude --resume', spawnSync(cli, args, options));
   if (run.status === 0) return { ok: true, how: 'claude --resume' };
   const detail = ((run.stderr || run.stdout || '') + '').trim().split('\n')[0];
@@ -221,16 +235,29 @@ function deliverCodex(record, prompt, cli, runs) {
   // Codex keeps interactive sessions on a local app server, and queue is the
   // supported way to put a message into one from outside. If the thread is
   // gone, exec resume does the same work in a fresh process.
-  const queued = spawnSync(cli, ['queue', '--thread', record.id, '--message', prompt], {
-    encoding: 'utf8',
-    cwd: record.cwd,
-    timeout: 60000,
-    windowsHide: true,
-  });
+  // Same wall as the Claude path: Windows caps a command line at 8,191
+  // characters and a continuation can be longer than that. `queue --message`
+  // has no stdin form, so past the safe length it is skipped rather than
+  // attempted - a call that is known to fail is not worth the time it takes to
+  // fail. `exec` reads its prompt from stdin when none is given, so that path
+  // carries the long ones. UNVERIFIED against a live Codex: this is the Claude
+  // fix applied by analogy to the documented exec behaviour, not a measured
+  // run, because measuring it would spend the user's ChatGPT quota.
+  const text = String(prompt == null ? '' : prompt);
+  const fitsArgv = text.length <= 6000;
+  const queued = fitsArgv
+    ? spawnSync(cli, ['queue', '--thread', record.id, '--message', text], {
+        encoding: 'utf8',
+        cwd: record.cwd,
+        timeout: 60000,
+        windowsHide: true,
+      })
+    : { status: 1, stdout: '', stderr: 'continuation is ' + text.length + ' chars, too long for argv; going straight to exec' };
   appendRun(runs, 'codex queue', queued);
   if (queued.status === 0) return { ok: true, how: 'codex queue' };
-  const run = spawnSync(cli, ['exec', 'resume', record.id, prompt, '--skip-git-repo-check'], {
+  const run = spawnSync(cli, ['exec', 'resume', record.id, '--skip-git-repo-check'], {
     encoding: 'utf8',
+    input: text,
     cwd: record.cwd,
     timeout: RESUME_TIMEOUT_MS,
     windowsHide: true,

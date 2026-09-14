@@ -289,12 +289,13 @@ test('the resumed run is told the permission mode, because a resume does not inh
   const args = wake.claudeArgs(record, 'go on', { permissionMode: 'acceptEdits', model: 'sonnet' }, false);
   // --permission-prompts none: nobody is awake to answer one, so an
   // unanswerable prompt must deny rather than stall the run to its timeout.
-  assert.deepStrictEqual(args, ['--resume', 'sess-1234', '-p', 'go on', '--permission-mode', 'acceptEdits', '--permission-prompts', 'none', '--model', 'sonnet']);
+  // The prompt is deliberately ABSENT from argv - it travels on stdin.
+  assert.deepStrictEqual(args, ['--resume', 'sess-1234', '-p', '--permission-mode', 'acceptEdits', '--permission-prompts', 'none', '--model', 'sonnet']);
   const fallback = wake.claudeArgs(record, 'go on', { permissionMode: 'acceptEdits' }, true);
-  assert.deepStrictEqual(fallback, ['--continue', '-p', 'go on', '--permission-mode', 'acceptEdits', '--permission-prompts', 'none']);
+  assert.deepStrictEqual(fallback, ['--continue', '-p', '--permission-mode', 'acceptEdits', '--permission-prompts', 'none']);
   // Even with no config at all, the prompts flag goes on: the reason for it is
   // that nobody is there, which is true regardless of what was configured.
-  assert.deepStrictEqual(wake.claudeArgs(record, 'go on', {}, false), ['--resume', 'sess-1234', '-p', 'go on', '--permission-prompts', 'none']);
+  assert.deepStrictEqual(wake.claudeArgs(record, 'go on', {}, false), ['--resume', 'sess-1234', '-p', '--permission-prompts', 'none']);
 });
 
 test('presence is unknown, not absent, when Computer Use is not installed', () => {
@@ -411,3 +412,15 @@ test('a relay that never registered a task has no task to unregister', () =>
     armed();
     assert.strictEqual(relay.read().armed.task, null, 'schedule:false must not claim a task name');
   }));
+
+test('the continuation never rides on argv, however long it is', () => {
+  // 2026-09-14: a relay booked for 09:55 fired three times and died three times
+  // with "The command line is too long." The 7.5 KB note was the -p argument.
+  // Windows caps a command line at 8,191 characters; stdin caps at 10 MB.
+  const huge = 'x'.repeat(50000);
+  const record = { id: 'sess-1234', cwd: process.cwd() };
+  const args = wake.claudeArgs(record, huge, { permissionMode: 'bypassPermissions', model: 'opus' }, false);
+  assert.ok(!args.some((a) => a.length > 200), 'no argument may carry the prompt');
+  assert.ok(!args.includes(huge), 'the prompt must not be an argument');
+  assert.ok(args.join(' ').length < 500, 'argv stays far under the Windows limit');
+});
