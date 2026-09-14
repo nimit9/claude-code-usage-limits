@@ -147,6 +147,10 @@ test('a very long todo list cannot make the record unbounded', () =>
 
 test('the continuation is stored, marked on the record and deleted with the relay', () =>
   withConfigDir(() => {
+    // The runner inherits the real session id; this test speaks for sess-1234.
+    const savedId = process.env.CLAUDE_CODE_SESSION_ID;
+    process.env.CLAUDE_CODE_SESSION_ID = 'sess-1234';
+    try {
     relay.configure({ enabled: true });
     armed();
     assert.strictEqual(relay.read().armed.continuation, false);
@@ -159,6 +163,10 @@ test('the continuation is stored, marked on the record and deleted with the rela
     assert.strictEqual(relay.read().armed, null);
     assert.strictEqual(relay.read().history.length, 1);
     assert.strictEqual(relay.read().history[0].outcome, 'cancelled');
+    } finally {
+      if (savedId === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+      else process.env.CLAUDE_CODE_SESSION_ID = savedId;
+    }
   }));
 
 test('an empty continuation is refused rather than stored as nothing', () =>
@@ -437,7 +445,7 @@ test('another session cannot overwrite an armed continuation by accident', () =>
     process.env.CLAUDE_CODE_SESSION_ID = 'some-other-session';
     try {
       assert.strictEqual(relay.saveContinuation('sess-1234', 'not mine to write'), null, 'refused by default');
-      assert.strictEqual(relay.readContinuation('sess-1234'), null, 'and nothing was written');
+      assert.ok(!relay.readContinuation('sess-1234'), 'and nothing was written');
       assert.ok(relay.saveContinuation('sess-1234', 'on purpose', { force: true }), 'force writes it');
       assert.strictEqual(relay.readContinuation('sess-1234'), 'on purpose');
       // Writing under your OWN id is never guarded, armed or not.
