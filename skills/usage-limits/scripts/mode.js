@@ -393,6 +393,9 @@ function empty() {
     // means refusing fan-outs on a fresh window for a reason nobody gave. A
     // stored cap with no session here predates this rule and is ignored.
     ceilingSession: null,
+    // Applies to EVERY session, survives a reset, and is only cleared by
+    // asking. The session-scoped cap above lapses on purpose; this does not.
+    ceilingAlways: null,
     setAt: null,
     setBy: null,
     session: null,
@@ -437,6 +440,10 @@ function read() {
   // Anything outside 1-100 is not a ceiling, and enforcing a number that was
   // never a percentage would refuse work over a typo.
   base.ceilingSession = typeof parsed.ceilingSession === 'string' ? parsed.ceilingSession : null;
+  base.ceilingAlways =
+    Number.isFinite(parsed.ceilingAlways) && parsed.ceilingAlways > 0 && parsed.ceilingAlways <= 100
+      ? parsed.ceilingAlways
+      : null;
   base.ceilingPercent =
     Number.isFinite(parsed.ceilingPercent) && parsed.ceilingPercent > 0 && parsed.ceilingPercent <= 100
       ? parsed.ceilingPercent
@@ -1476,6 +1483,9 @@ function main(argv) {
     if (ceilingArg.error) return ceilingArg.error;
     const state = read();
     const previous = state.ceilingPercent;
+    if (flag('--always')) {
+      state.ceilingAlways = ceilingArg.clear ? null : ceilingArg.percent;
+    }
     state.ceilingPercent = ceilingArg.clear ? null : ceilingArg.percent;
     state.ceilingSession = ceilingArg.clear ? null : sessionId;
     write(state);
@@ -1495,6 +1505,7 @@ function clearCeiling(now) {
   const previous = state.ceilingPercent;
   state.ceilingPercent = null;
   state.ceilingSession = null;
+  state.ceilingAlways = null;
   write(state);
   logChange({ plane: 'mode', key: 'ceiling', from: previous, to: null, by: 'user', reason: null }, now);
 }
@@ -1503,6 +1514,13 @@ function clearCeiling(now) {
 // refusal, because a percentage on its own does not tell anyone what changes.
 function ceilingLine() {
   const state = read();
+  if (Number.isFinite(state.ceilingAlways)) {
+    return (
+      'Standing cap ' + state.ceilingAlways + '%, for this and every future session on this ' +
+      'machine, including after a limit resets. Past it, fan-out calls are refused at the hook; ' +
+      'nothing else is blocked. "mode --cap off --always" removes it.'
+    );
+  }
   if (state.ceilingPercent === null || state.ceilingPercent === undefined) {
     return 'Ceiling off. Nothing is refused; the plugin reports and does not intervene.';
   }

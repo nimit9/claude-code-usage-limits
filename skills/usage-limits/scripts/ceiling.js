@@ -92,15 +92,25 @@ function ceilingFrom(state, env, sessionId) {
     // A ceiling that cannot be read is not a ceiling of zero. Fall through to
     // the file rather than enforcing a number nobody typed.
   }
+  // A STANDING cap applies to every session on this machine, including ones
+  // that start after a limit reset. It is the answer to "keep 60 per cent for
+  // next session too": a session-owned cap deliberately lapses, so something
+  // that outlives a session has to be stored as its own thing rather than by
+  // weakening the ownership rule.
+  const always =
+    state && Number.isFinite(state.ceilingAlways) && state.ceilingAlways > 0 && state.ceilingAlways <= 100
+      ? state.ceilingAlways
+      : null;
+  const standing = always === null ? null : { percent: always, source: 'the standing cap' };
   const stored = state && Number.isFinite(state.ceilingPercent) ? state.ceilingPercent : null;
-  if (stored === null || stored <= 0 || stored > 100) return { percent: null, source: null };
+  if (stored === null || stored <= 0 || stored > 100) return standing || { percent: null, source: null };
   const owner = state && state.ceilingSession ? String(state.ceilingSession) : null;
   if (!owner) {
     // Set before caps were session-scoped. Not this session's instruction.
-    return { percent: null, source: null, staleCap: stored };
+    return standing || { percent: null, source: null, staleCap: stored };
   }
   if (!sessionId || String(sessionId) !== owner) {
-    return { percent: null, source: null, otherSessionCap: stored };
+    return standing || { percent: null, source: null, otherSessionCap: stored };
   }
   return { percent: stored, source: 'this session' };
 }
