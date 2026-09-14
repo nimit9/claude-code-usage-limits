@@ -643,7 +643,11 @@ function schedulePosix(when, argv, name, cwd) {
       encoding: 'utf8',
       timeout: 20000,
     });
-    if (run.status === 0) return { ok: true, how: 'at' };
+    // macOS ships `at` but launchd leaves atrun DISABLED by default, so the
+    // command succeeds, prints a job id, and the wake never fires. Reporting
+    // ok for that is worse than not having it: it is a silent no-op that looks
+    // like a scheduled wake. Fall through to the sleeper, which at least runs.
+    if (run.status === 0 && process.platform !== 'darwin') return { ok: true, how: 'at' };
   }
   try {
     const child = spawn('sh', ['-c', 'sleep ' + seconds + ' && ' + command], {
@@ -767,16 +771,41 @@ function arm(input) {
         }
       : null,
   };
-  if (state.armed && state.armed.id !== id && state.armed.task) cancelSchedule(state.armed.task);
+  // Displacing somebody else's live relay is legitimate - one machine, one
+  // relay - but it must not be silent. A wake still in the future belonged to
+  // work that somebody expected to be picked up.
+  if (state.armed && state.armed.id !== id) {
+    if (Number.isFinite(state.armed.wakeAt) && state.armed.wakeAt > now) {
+      note('displacing the relay armed for ' + state.armed.id + ' (was due ' + new Date(state.armed.wakeAt).toISOString() + ')', now);
+    }
+    if (state.armed.task) cancelSchedule(state.armed.task);
+  }
   state.armed = record;
   write(state);
   note('armed ' + id + ' for ' + new Date(when).toISOString() + ' via ' + scheduled.how, now);
   return { ok: true, record };
 }
 
-function disarm(reason, now) {
+// `id` is optional, and when it is given it is a guard rather than a lookup:
+// clear the relay only if the thing armed is the thing the caller means.
+//
+// Without it, disarm clears whatever happens to be armed, and that is not
+// hypothetical. Measured 2026-09-14: a second process armed a throwaway
+// session at 04:57:04 and cleaned it up four seconds later, and the cleanup
+// took a live relay for an unrelated session - armed seven seconds earlier,
+// due to wake five hours later - with it. Nothing reported that, because from
+// disarm's point of view it did exactly what it was asked.
+//
+// A person typing `relay cancel` means "whatever is armed", so the CLI passes
+// no id and the old behaviour stands. Anything that knows which session it is
+// tidying up should say so.
+function disarm(reason, now, id) {
   const state = read();
   if (!state.armed) return { ok: true, changed: false };
+  if (id && state.armed.id !== id) {
+    note('refused to disarm ' + state.armed.id + ' on behalf of ' + id, Number.isFinite(now) ? now : Date.now());
+    return { ok: true, changed: false, refused: true, armed: state.armed.id };
+  }
   const record = state.armed;
   if (record.task) cancelSchedule(record.task);
   state.history.push(Object.assign({}, record, { endedAt: Number.isFinite(now) ? now : Date.now(), outcome: reason || 'cancelled' }));

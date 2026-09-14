@@ -146,6 +146,10 @@ function userIsPresent(cli) {
 function claudeArgs(record, prompt, config, fallback) {
   const args = fallback ? ['--continue', '-p', prompt] : ['--resume', record.id, '-p', prompt];
   if (config.permissionMode) args.push('--permission-mode', config.permissionMode);
+  // Nobody is awake to answer a prompt. Deny it rather than stall on it: a
+  // resumed run that sits waiting for a keystroke burns its whole timeout and
+  // reports nothing.
+  args.push('--permission-prompts', 'none');
   if (!fallback && config.model) args.push('--model', config.model);
   return args;
 }
@@ -186,12 +190,29 @@ function deliverClaude(record, prompt, config, cli, runs) {
   const run = appendRun(runs, 'claude --resume', spawnSync(cli, args, options));
   if (run.status === 0) return { ok: true, how: 'claude --resume' };
   const detail = ((run.stderr || run.stdout || '') + '').trim().split('\n')[0];
-  // A session id that no longer resolves is the one failure worth a second
-  // attempt: the work still needs doing, only the thread is gone.
+  // A session id that no longer resolves used to fall back to `--continue`,
+  // on the reasoning that the work still needs doing and only the thread is
+  // gone. That fallback is removed, because of what `--continue` actually
+  // selects.
+  //
+  // `--continue` normally SKIPS sessions created by `claude -p`, the SDK and
+  // /loop - but `claude -p --continue`, which is exactly what this ran,
+  // INCLUDES them. So the most recent session it could land on is a previous
+  // relay's own headless run, not the user's work. Resuming that, unattended,
+  // at four in the morning, with permissionMode bypassPermissions, means an
+  // agent continuing a conversation nobody chose, in a directory it was not
+  // asked about.
+  //
+  // The plan is on disk either way. A wake that stops and says the thread is
+  // gone loses nothing; a wake that resumes the wrong conversation can.
   if (/No conversation found/i.test(detail)) {
-    const second = appendRun(runs, 'claude --continue', spawnSync(cli, claudeArgs(record, prompt, config, true), options));
-    if (second.status === 0) return { ok: true, how: 'claude --continue' };
-    return { ok: false, error: ((second.stderr || second.stdout || '') + '').trim().split('\n')[0] || detail };
+    return {
+      ok: false,
+      error:
+        'the session ' + String(record.id).slice(0, 8) + ' no longer exists, so there was nothing to resume. ' +
+        'The plan is still on disk: run "claude" in ' + record.cwd + ' and paste it in.',
+      permanent: true,
+    };
   }
   return { ok: false, error: detail || 'claude exited ' + run.status };
 }

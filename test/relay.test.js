@@ -283,10 +283,14 @@ test('task names and PowerShell strings cannot carry anything through', () => {
 test('the resumed run is told the permission mode, because a resume does not inherit one', () => {
   const record = { id: 'sess-1234', cwd: '/work' };
   const args = wake.claudeArgs(record, 'go on', { permissionMode: 'acceptEdits', model: 'sonnet' }, false);
-  assert.deepStrictEqual(args, ['--resume', 'sess-1234', '-p', 'go on', '--permission-mode', 'acceptEdits', '--model', 'sonnet']);
+  // --permission-prompts none: nobody is awake to answer one, so an
+  // unanswerable prompt must deny rather than stall the run to its timeout.
+  assert.deepStrictEqual(args, ['--resume', 'sess-1234', '-p', 'go on', '--permission-mode', 'acceptEdits', '--permission-prompts', 'none', '--model', 'sonnet']);
   const fallback = wake.claudeArgs(record, 'go on', { permissionMode: 'acceptEdits' }, true);
-  assert.deepStrictEqual(fallback, ['--continue', '-p', 'go on', '--permission-mode', 'acceptEdits']);
-  assert.deepStrictEqual(wake.claudeArgs(record, 'go on', {}, false), ['--resume', 'sess-1234', '-p', 'go on']);
+  assert.deepStrictEqual(fallback, ['--continue', '-p', 'go on', '--permission-mode', 'acceptEdits', '--permission-prompts', 'none']);
+  // Even with no config at all, the prompts flag goes on: the reason for it is
+  // that nobody is there, which is true regardless of what was configured.
+  assert.deepStrictEqual(wake.claudeArgs(record, 'go on', {}, false), ['--resume', 'sess-1234', '-p', 'go on', '--permission-prompts', 'none']);
 });
 
 test('presence is unknown, not absent, when Computer Use is not installed', () => {
