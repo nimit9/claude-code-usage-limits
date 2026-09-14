@@ -337,9 +337,29 @@ function detectWork(transcriptPath, options) {
 // The continuation the session wrote itself, stored by the /usage-limits:relay
 // note command. This is the good case: a paragraph from the session that knows
 // what it was doing beats anything reconstructed from a todo list.
-function saveContinuation(id, text) {
-  const body = String(text || '').slice(0, 8000).trim();
+// The continuation is delivered on stdin now (wake.js), where the cap is
+// 10 MB, so the old 8,000-character slice was a leftover from the argv era -
+// and a silent one: a plan that ran long simply lost its tail. 64 KB is more
+// than any note needs and small enough that a runaway write cannot fill a
+// disk.
+const CONTINUATION_MAX = 65536;
+
+// `options.force` is the only way to write ANOTHER session's armed
+// continuation. On 2026-09-14 a session wrote its note to whatever record was
+// armed without checking whose it was; the armed record belonged to a peer,
+// and the peer's 343-byte handoff was replaced with 3 KB of somebody else's
+// plan minutes before it was due to fire. One machine has one relay, so
+// displacement is normal - but a session may only overwrite a different
+// session's plan on purpose, never by default.
+function saveContinuation(id, text, options) {
+  const body = String(text || '').slice(0, CONTINUATION_MAX).trim();
   if (!body) return null;
+  const me = process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID || null;
+  const armedNow = read().armed;
+  if (armedNow && armedNow.id === id && me && me !== id && !(options && options.force)) {
+    note('refused to overwrite the armed continuation of ' + id + ' from session ' + me + ' (pass force to do it on purpose)');
+    return null;
+  }
   try {
     fs.mkdirSync(configDir(), { recursive: true });
     fs.writeFileSync(planFile(id), body + '\n');

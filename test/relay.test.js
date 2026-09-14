@@ -424,3 +424,35 @@ test('the continuation never rides on argv, however long it is', () => {
   assert.ok(!args.includes(huge), 'the prompt must not be an argument');
   assert.ok(args.join(' ').length < 500, 'argv stays far under the Windows limit');
 });
+
+test('another session cannot overwrite an armed continuation by accident', () =>
+  withConfigDir(() => {
+    // 2026-09-14: a session wrote its plan to whatever record was armed, which
+    // was a peer's, minutes before it was due. One machine has one relay, so
+    // displacement is normal - but overwriting a different session's plan is
+    // only ever allowed on purpose.
+    relay.configure({ enabled: true });
+    armed(); // arms sess-1234
+    const savedId = process.env.CLAUDE_CODE_SESSION_ID;
+    process.env.CLAUDE_CODE_SESSION_ID = 'some-other-session';
+    try {
+      assert.strictEqual(relay.saveContinuation('sess-1234', 'not mine to write'), null, 'refused by default');
+      assert.strictEqual(relay.readContinuation('sess-1234'), null, 'and nothing was written');
+      assert.ok(relay.saveContinuation('sess-1234', 'on purpose', { force: true }), 'force writes it');
+      assert.strictEqual(relay.readContinuation('sess-1234'), 'on purpose');
+      // Writing under your OWN id is never guarded, armed or not.
+      assert.ok(relay.saveContinuation('some-other-session', 'my own plan'));
+    } finally {
+      if (savedId === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+      else process.env.CLAUDE_CODE_SESSION_ID = savedId;
+    }
+  }));
+
+test('the continuation cap is far above the old argv limit', () =>
+  withConfigDir(() => {
+    // 8,000 was the argv era. The note is on stdin now, and a plan that ran
+    // long was losing its tail silently.
+    const long = 'x'.repeat(20000);
+    relay.saveContinuation('sess-long', long);
+    assert.strictEqual(relay.readContinuation('sess-long').length, 20000);
+  }));
