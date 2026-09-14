@@ -19,6 +19,17 @@ opens with the answer instead:
 
 Nobody read a chart to get that. The numbers reached the model, not you.
 
+## Do not want any of this?
+
+    node bin/cli.js mode off              nothing injected, ever - including at the wall
+    node bin/cli.js mode off --guard 95   silent, except one short line at 95% used
+    node bin/cli.js statusline off        take the bars out from under the prompt
+
+`off` means off: no budget line, no end-of-reply cost, no panel animation. Most
+people who want quiet actually want the second form - silence until it matters.
+Both apply to new prompts immediately and survive restarts. `mode standard`
+turns it back on.
+
 ## How this differs from a usage dashboard
 
 There are a lot of good tools that read the same local files this does and draw

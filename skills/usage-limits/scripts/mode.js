@@ -1155,9 +1155,23 @@ function tierLine(tier, options) {
   // Codex, and telling Codex to run them is telling it to do nothing while
   // believing it acted - the mistake levers() already exists to prevent.
   const dear = topTier(run.model || base.model, run.effort || base.effort);
+  // What the plugin can actually do about the tier, stated exactly.
+  //
+  // Nothing in a hook, a tool or the SDK can change a running session's model
+  // or effort - that was researched to the primary sources on 2026-09-14 and
+  // the answer is a flat no. /model and /effort are the user's, by design. So
+  // the most honest thing this line can do is name the decision and, where it
+  // is cheap, say so: on Fable 5.1 on a subscription an /effort change keeps
+  // the prompt cache (prompt-caching doc, v2.1.260+), which makes stepping
+  // effort down mid-session free. On every other model it rebuilds the cache,
+  // and on a large context that can cost more than a few cheaper turns save -
+  // so there the advice is to choose at the START of a session.
+  const onFable = sameFamily(run.model || base.model, 'fable');
   const decide = dear
-    ? ' Decide in one line whether the work in front of you needs ' + runningText +
-      ', and step down through your own controls if it does not.'
+    ? ' Decide in one line whether the work in front of you needs ' + runningText + '.' +
+      (onFable
+        ? ' On Fable 5.1 an /effort change keeps the cache, so if the next stretch is mechanical, /effort low now costs nothing.'
+        : ' Changing effort or model mid-session rebuilds the cache, so if it does not, say so and choose lower at the next session start rather than switching now.')
     : '';
   return differs
     ? 'Running ' + runningText + source + '; your baseline is ' + baseText + '. The gap is the ' +

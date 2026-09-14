@@ -6,6 +6,9 @@ Run `node "${CLAUDE_PLUGIN_ROOT}/skills/usage-limits/scripts/mode.js" $ARGUMENTS
 and report the answer back. Then stop; do not start other work as part of this
 command.
 
+If the user just wants it gone: `off` injects nothing at all, `off --guard 95`
+stays silent until 95 per cent. Say which you ran.
+
 The plugin is not free. It puts a line into your context before every prompt,
 refreshes readings after tool calls, and keeps a status line alive. A mode
 changes two things at once: what the plugin tells you to do, and what it costs

@@ -275,6 +275,16 @@ The user can also ask any time with `/usage-limits:session`, or run
 `--sessions` for the history of recent sessions on this machine.
 
 
+## Turning it off
+
+If the user says they do not want the budget line, the cost line, or the status
+bars, do not argue and do not explain the trade-off unless asked. Run:
+
+    node "$CLAUDE_PLUGIN_ROOT/skills/usage-limits/scripts/mode.js" off
+
+and, for the bars, `statusline off`. `mode off --guard 95` is the middle
+ground: silent until 95 per cent. Say which one you ran and stop.
+
 ## Budget modes
 
 How hard this plugin leans, and what it costs to say it. Four modes, set by the
