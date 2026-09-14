@@ -193,7 +193,13 @@ test('a previous status line runs first and its output goes above ours', () => {
   fs.writeFileSync(
     path.join(dir, 'usage-limits-statusline.json'),
     JSON.stringify({
-      previous: { type: 'command', command: '"' + process.execPath + '" -e "process.stdout.write(\'prev line\')"' },
+      // A shell echo, not a node spawn. runPrevious gives the chained command
+      // only what is LEFT of the two-second budget after our own work, so under
+      // a loaded parallel run a node cold start was being starved, timing out,
+      // and then silently dropped - which is indistinguishable from a failure
+      // and made this test flaky. spawnSync uses shell:true, so echo works on
+      // cmd and sh alike and costs nothing to start.
+      previous: { type: 'command', command: 'echo prev line' },
       chain: true,
     })
   );

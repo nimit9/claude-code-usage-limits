@@ -611,6 +611,17 @@ function verifyRegistration(state, next, wanted, now) {
   if (!text) {
     return { ok: false, error: 'the scheduled task registered but Windows reports no next run time, so it will not fire' };
   }
+  // It has to LOOK like a timestamp before it is read as one.
+  //
+  // Date.parse is far too willing: Date.parse("12345") is the year 12345, which
+  // is finite, comfortably in the future, and would sail through every check
+  // below. This function exists to refuse a task that will not fire, so
+  // accepting garbage as proof that one will is the worst failure it has.
+  // PowerShell's .ToString("s") is always yyyy-MM-ddTHH:mm:ss; anything else is
+  // not an answer to the question that was asked.
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?/.test(text)) {
+    return { ok: false, error: 'could not read the next run time Windows reported: ' + text };
+  }
   const at = Date.parse(text);
   if (!Number.isFinite(at)) {
     return { ok: false, error: 'could not read the next run time Windows reported: ' + text };
@@ -703,6 +714,16 @@ function scheduleWindows(when, argv, name, cwd, deadline) {
       { encoding: 'utf8', windowsHide: true, timeout: Math.max(500, remainingMs(deadline, 8000)) }
     );
     if (fallback.status === 0) return { ok: true, how: 'schtasks', warning: 'a sleeping machine will miss this wake' };
+    // Both paths failed. If the PowerShell one registered something that
+    // will not fire - or will fire at the wrong time - leaving it behind is
+    // an orphan that nothing tracks and nothing cancels.
+    if (lastVerifyError) {
+      try {
+        cancelSchedule(name);
+      } catch (err) {
+        // Nothing further to do; the expiry is the backstop.
+      }
+    }
     return { ok: false, error: (lastVerifyError || run.stderr || fallback.stderr || 'could not register a scheduled task').trim().split('\n')[0] };
   } catch (err) {
     return { ok: false, error: err.message };
@@ -812,15 +833,16 @@ function arm(input) {
   const id = options.sessionId;
   const name = taskName(id, when);
   // Names are unique per wake now, so re-arming no longer replaces the old
-  // registration by name. Retire it explicitly, or every re-arm leaves a live
-  // task behind that would fire on its own.
-  if (state.armed && state.armed.task && state.armed.task !== name) {
-    try {
-      cancelSchedule(state.armed.task);
-    } catch (err) {
-      // The expiry removes it eventually either way.
-    }
-  }
+  // registration by name; the previous one has to be retired by hand or it
+  // stays live and fires on its own.
+  //
+  // It is retired AFTER the replacement is registered, never before. While
+  // the names were identical, -Force made this one atomic operation. With
+  // unique names, cancelling first opens a window in which the old wake is
+  // gone and the new one does not exist yet - and if registration then
+  // fails, that window never closes: the user is left with no relay at all,
+  // unattended, having had a working one a moment earlier.
+  const previousTask = state.armed && state.armed.task && state.armed.task !== name ? state.armed.task : null;
   // Re-arming the same session for the same reset would register the task
   // twice; -Force replaces it, and the record is rewritten either way.
   const argv = [path.join(__dirname, 'wake.js'), '--id', id];
@@ -831,8 +853,18 @@ function arm(input) {
   // testing meant it read the real one and found nothing armed.
   if (process.env.CLAUDE_CONFIG_DIR) argv.push('--config-dir', process.env.CLAUDE_CONFIG_DIR);
   const scheduled = options.schedule === false ? { ok: true, how: 'none' } : schedule(when, argv, name, options.cwd, options.deadline);
+  if (scheduled.ok && previousTask) {
+    // Safe now: the replacement exists.
+    try {
+      cancelSchedule(previousTask);
+    } catch (err) {
+      // The expiry removes it eventually either way.
+    }
+  }
   if (!scheduled.ok) {
-    note('arm failed for ' + id + ': ' + scheduled.error, now);
+    // The old wake is deliberately left alone here. A stale wake that still
+    // fires is worth more than none, and it carries the same continuation.
+    note('arm failed for ' + id + ': ' + scheduled.error + (previousTask ? '; the previous wake was left in place' : ''), now);
     return { ok: false, error: scheduled.error };
   }
 

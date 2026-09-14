@@ -88,3 +88,66 @@ test('with no requested time, any future run is accepted', () => {
   const verdict = relay.verifyRegistration('Ready', iso(NOW + 60 * 60 * 1000), null, NOW);
   assert.equal(verdict.ok, true, verdict.error);
 });
+
+test('a failed re-arm leaves the previous wake in place', () => {
+  // Names are unique per wake, so re-arming is no longer an atomic -Force
+  // replace. Cancelling the old task before registering the new one opens a
+  // window where neither exists - and if registration fails, that window never
+  // closes: a working relay is destroyed and nothing replaces it.
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const saved = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-limits-rearm-'));
+  try {
+    const now = Date.now();
+    const first = relay.arm({
+      now,
+      sessionId: 'ordering-test',
+      cwd: process.cwd(),
+      hostName: 'claude',
+      at: now + 40 * 60 * 1000,
+      binding: { percentUsed: 10, resetsAt: now + 3 * 60 * 60 * 1000 },
+      work: { hasWork: true, pending: 1, todos: [] },
+      schedule: false, // no real task; this test is about bookkeeping order
+    });
+    assert.equal(first.ok, true, first.error);
+    const original = relay.read().armed;
+    assert.ok(original && original.id === 'ordering-test');
+
+    // A deadline already past makes scheduleWindows refuse before registering.
+    const second = relay.arm({
+      now,
+      sessionId: 'ordering-test',
+      cwd: process.cwd(),
+      hostName: 'claude',
+      at: now + 90 * 60 * 1000,
+      binding: { percentUsed: 10, resetsAt: now + 3 * 60 * 60 * 1000 },
+      work: { hasWork: true, pending: 1, todos: [] },
+      deadline: now - 1,
+    });
+    assert.equal(second.ok, false, 'registration should have been refused');
+
+    // The old record must survive a failed replacement.
+    const after = relay.read().armed;
+    assert.ok(after, 'something must still be armed after a failed re-arm');
+    assert.equal(after.task, original.task, 'the previous wake must be left in place');
+  } finally {
+    if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = saved;
+  }
+});
+
+test('garbage is not accepted as proof that a task will fire', () => {
+  // Date.parse is far too willing. Date.parse("12345") is the year 12345 -
+  // finite, in the future, and it would pass every other check in here. A
+  // function whose whole job is refusing wakes that will not happen must not
+  // accept nonsense as evidence that one will.
+  for (const junk of [12345, '12345', 'Ready', '99', 'next Tuesday', {}, []]) {
+    const verdict = relay.verifyRegistration('Ready', junk, null, NOW);
+    assert.equal(verdict.ok, false, JSON.stringify(junk) + ' must be refused');
+  }
+  // And a real stamp still passes, with or without seconds.
+  assert.equal(relay.verifyRegistration('Ready', iso(NOW + 3600000), null, NOW).ok, true);
+  assert.equal(relay.verifyRegistration('Ready', iso(NOW + 3600000).slice(0, 16), null, NOW).ok, true);
+});
