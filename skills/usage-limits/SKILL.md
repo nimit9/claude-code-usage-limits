@@ -620,6 +620,32 @@ which files are mid-change, what must be verified before anything is built on
 it. It is delivered as a prompt, so an instruction beats a summary. If nothing
 is written, the relay falls back to the outstanding todo list, which is worse.
 
+**It arms at the end of a reply, not in the middle of one.** Crossing the
+threshold no longer schedules anything by itself: the relay waits for the reply
+to finish, so what it carries is work that reached a boundary rather than a
+snapshot of an interruption. Past the backstop (95 per cent by default) it stops
+waiting and arms anyway, because a completion that never comes - the limit cut
+the reply off mid-sentence - is a relay that was never armed at all. That is
+what "waiting for this reply to finish before arming" means when the budget line
+says it, and it is not an error. `relay armon threshold` restores the old
+behaviour.
+
+**Being offline is not failing.** Before it launches anything the wake checks it
+can actually reach the API, and a machine that cannot is held, not spent: it
+retries on a backoff for hours rather than burning the relay on a launch that
+could not work. This exists because it happened - a relay woke on time, said
+`SSL certificate hostname mismatch` 1.5 seconds later, recorded a failure and
+deleted itself, and a night's work was lost to a router being off. A failed
+launch is also classified now: the network and a busy service buy another
+window, an invalid key or a missing CLI does not, because retrying those would
+waste the window and saying "retrying" would be a lie.
+
+Run `relay doctor` before trusting it with anything. It checks the things that
+fail silently hours later - a CLI that moved, a permission mode nobody set, a
+machine whose power plan forbids wake timers, a scheduled task this account
+cannot register, no continuation written, no network - and says which would
+bite. Every resumed run's full output is kept: `relay log --run`.
+
 The relay is off unless the user turned it on, and it only arms while there is
 an unfinished todo list or an approved plan to carry. Do not turn it on for
 them, and do not promise behaviour it does not have:
@@ -628,6 +654,8 @@ them, and do not promise behaviour it does not have:
   input to a shell on purpose; the relay uses it only to tell whether somebody
   is at the keyboard, and to show a banner.
 - In `notify` mode — the default — it raises a notification and starts nothing.
+- The resumed run opens in a window you can see. `relay show off` hides it; the
+  output is kept either way.
 - In `resume` mode it runs the CLI itself. A headless resume does **not**
   inherit the session's permission mode, so unless one was set the resumed run
   will sit waiting for an approval nobody is there to give.
@@ -810,7 +838,8 @@ stop.
 | `scripts/live.js` | The usage reading itself, taken the way Claude Code takes it for `/usage`, kept in `usage-limits-live.json` where `collect()` prefers it when newer than the cache. |
 | `scripts/drift.js` | How wrong the reading was: each correction written down against the one it replaced. Run it with no arguments for the median and worst gap measured so far, `--json` for the fields. Answer "how far behind does this plugin actually run" from here rather than from memory. |
 | `scripts/view.js`, `scripts/bars.js`, `scripts/activity.js` | The display model, the drawing in Claude's colours, and the working/idle marks the hooks leave for the panel. Not meant to be called by hand. |
-| `scripts/relay.js` | The relay: `status`, `on`/`off`, `at N`, `grace N`, `mode notify\|resume`, `permission MODE`, `thinking off\|resume\|always`, `note "<text>"`, `cancel`, `log`. |
+| `scripts/relay.js` | The relay: `status`, `on`/`off`, `at N`, `grace N`, `mode notify\|resume`, `permission MODE`, `thinking off\|resume\|always`, `armon threshold\|completion`, `backstop N`, `show on\|off`, `onfailure rearm\|stop`, `rearms N`, `offline N`, `doctor`, `note "<text>"`, `cancel`, `log [--run]`. |
+| `scripts/net.js` | Can this machine reach the API, and was a failed run the network's fault. Three probes, TLS-interception detection, and the backoff the offline retries use. |
 | `scripts/wake.js` | What the scheduler runs after the reset: re-checks the meter, then notifies or resumes. Never called by hand. |
 | `scripts/voice.js` | The local writing profile: `show`, `card`, `set "<instruction>"`, `clear`, `off`/`on`, `forget`. |
 | `references/how-it-works.md` | Where the numbers come from and where they are soft. |

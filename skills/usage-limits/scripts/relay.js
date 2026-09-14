@@ -68,6 +68,43 @@ const DEFAULTS = {
   // session is the one that matters; a second agent in the same directory is
   // a way to lose work.
   whenBusy: 'notify',
+  // WHERE IN THE TURN the arming happens.
+  //
+  //   threshold  the moment the window crosses `at`, which is mid-reply. What
+  //              gets carried is whatever state the reply happened to be in.
+  //   completion the end of the reply. The work has reached a boundary, the
+  //              todo list is current, and the continuation describes
+  //              something finished rather than something interrupted.
+  //
+  // 'completion' is the default because the difference is not cosmetic: a
+  // continuation captured halfway through a tool call describes a state the
+  // next session cannot resume from cleanly.
+  armOn: 'completion',
+  // The exception to waiting for a boundary. Past this, arm immediately
+  // whatever the turn is doing - a relay that politely waits for a completion
+  // that never comes, because the limit cut the reply off mid-sentence, is a
+  // relay that was never armed at all.
+  backstopAt: 95,
+  // Being offline is not failing. These are the retries reserved for a machine
+  // that cannot reach the API, and the minutes between them. Twelve at ten
+  // minutes covers two hours of a router being off, which is the common case.
+  offlineAttempts: 12,
+  offlineRetryMinutes: 10,
+  // Run the resumed session in a window you can see. Invisible is tidier and
+  // it is also how you find out in the morning that nothing happened and have
+  // no idea why.
+  show: true,
+  // What happens after a wake fails for a reason that will not fix itself:
+  // arm again for the next window, or stop and leave it to a person.
+  onFailure: 'rearm',
+  // And how many times it may do that. Without a cap, "arm again for the next
+  // window" is a scheduled task that reschedules itself forever, which is a
+  // worse failure than giving up: it is invisible, it never ends, and nobody
+  // asked for it. Two rearms means the work gets three windows to happen in.
+  maxRearms: 2,
+  // Keep the full stdout and stderr of every resumed run on disk. It is the
+  // only record of what happened while nobody was watching.
+  runLog: true,
 };
 
 function configDir() {
@@ -80,6 +117,49 @@ function relayFile() {
 
 function logFile() {
   return path.join(configDir(), 'usage-limits-relay.log');
+}
+
+// Every resumed run's full output, kept per run. `relay log --run` reads the
+// newest one back. Without this a failed overnight wake leaves one line in the
+// note log and nothing to diagnose it with.
+function runLogDir() {
+  return path.join(configDir(), 'relay-runs');
+}
+
+function runLogFile(id, now) {
+  const stamp = new Date(Number.isFinite(now) ? now : Date.now()).toISOString().replace(/[:.]/g, '-');
+  return path.join(runLogDir(), String(id).slice(0, 8) + '-' + stamp + '.log');
+}
+
+function writeRunLog(file, text) {
+  try {
+    fs.mkdirSync(runLogDir(), { recursive: true });
+    fs.writeFileSync(file, String(text == null ? '' : text), 'utf8');
+    // Ten runs is more history than anyone reads and less than a directory
+    // nobody ever cleans.
+    const kept = fs.readdirSync(runLogDir()).filter((name) => name.endsWith('.log')).sort();
+    for (const stale of kept.slice(0, Math.max(0, kept.length - 10))) {
+      try {
+        fs.unlinkSync(path.join(runLogDir(), stale));
+      } catch (err) {
+        // A log that will not delete is not worth a failed wake.
+      }
+    }
+    return file;
+  } catch (err) {
+    return null;
+  }
+}
+
+function latestRunLog() {
+  try {
+    const names = fs.readdirSync(runLogDir()).filter((name) => name.endsWith('.log')).sort();
+    if (!names.length) return null;
+    const file = path.join(runLogDir(), names[names.length - 1]);
+    return { file, text: fs.readFileSync(file, 'utf8') };
+  } catch (err) {
+    return null;
+  }
 }
 
 function planFile(id) {
@@ -165,6 +245,14 @@ function settings(state) {
     model: typeof stored.model === 'string' ? stored.model : DEFAULTS.model,
     attempts: Math.min(10, Math.max(1, number(stored.attempts, DEFAULTS.attempts))),
     whenBusy: pick(stored.whenBusy, ['notify', 'resume'], DEFAULTS.whenBusy),
+    armOn: pick(env.USAGE_LIMITS_RELAY_ARM_ON, ['threshold', 'completion'], pick(stored.armOn, ['threshold', 'completion'], DEFAULTS.armOn)),
+    backstopAt: Math.min(100, Math.max(10, number(stored.backstopAt, DEFAULTS.backstopAt))),
+    offlineAttempts: Math.min(48, Math.max(1, number(stored.offlineAttempts, DEFAULTS.offlineAttempts))),
+    offlineRetryMinutes: Math.min(120, Math.max(2, number(stored.offlineRetryMinutes, DEFAULTS.offlineRetryMinutes))),
+    show: bool(stored.show, DEFAULTS.show),
+    onFailure: pick(stored.onFailure, ['rearm', 'stop'], DEFAULTS.onFailure),
+    maxRearms: Math.min(10, Math.max(0, number(stored.maxRearms, DEFAULTS.maxRearms))),
+    runLog: bool(stored.runLog, DEFAULTS.runLog),
   };
 }
 
@@ -603,6 +691,17 @@ function armable(input) {
   if (!Number.isFinite(binding.resetsAt)) return { ok: false, why: 'the window has no known reset time' };
   if (!options.sessionId) return { ok: false, why: 'no session id' };
   if (!options.work || !options.work.hasWork) return { ok: false, why: 'no plan or unfinished todo list to carry' };
+  // The boundary rule. Past the threshold but not yet at the backstop, arming
+  // waits for the reply to finish - the Stop hook passes atCompletion and this
+  // is the only caller that does. Mid-reply callers get told to wait, and the
+  // brief says so rather than reporting a silent nothing.
+  if (config.armOn === 'completion' && !options.atCompletion && binding.percentUsed < config.backstopAt) {
+    return {
+      ok: false,
+      pending: true,
+      why: 'waiting for this reply to finish before arming (past ' + config.backstopAt + ' per cent it stops waiting)',
+    };
+  }
   return { ok: true };
 }
 
@@ -610,7 +709,14 @@ function arm(input) {
   const options = input || {};
   const now = Number.isFinite(options.now) ? options.now : Date.now();
   const config = options.config || settings();
-  const when = wakeAt(options.resetsAt, config.graceMinutes, now);
+  // `at` is an exact wake time, for work deferred to a moment somebody named
+  // rather than to a window reset. The grace minutes exist so the meter has
+  // really turned over before a resume fires; a time a person typed does not
+  // want fifteen minutes added to it. Still floored a minute out, because a
+  // task registered for a moment already past fires immediately.
+  const when = Number.isFinite(options.at)
+    ? Math.max(options.at, now + MINUTE)
+    : wakeAt(options.resetsAt, config.graceMinutes, now);
   if (!when) return { ok: false, error: 'no reset time to wake after' };
 
   const state = read();
@@ -800,6 +906,110 @@ async function armByHand(rest) {
   );
 }
 
+/* ------------------------------------------------------------- doctor ----- */
+
+// Everything that has to be true hours from now, checked while somebody is
+// still here to fix it.
+//
+// The relay's whole promise is that it works unattended, and every part of it
+// fails quietly: a CLI that moved, a permission mode nobody set so the run sits
+// waiting for an approval, a machine that sleeps through its own wake, a
+// network that is not there. Each of those has cost a whole window at least
+// once. This asks all of them at once and says which would bite.
+async function doctor(now) {
+  const at = Number.isFinite(now) ? now : Date.now();
+  const state = read();
+  const config = settings(state);
+  const caps = capabilities();
+  const checks = [];
+  const add = (name, ok, detail, severity) => checks.push({ name, ok, detail, severity: severity || (ok ? 'ok' : 'error') });
+
+  add('relay enabled', config.enabled, config.enabled ? 'on, arming at ' + config.at + ' per cent' : 'off - nothing will ever be scheduled');
+  add('delivery mode', true, config.mode === 'resume' ? 'resume: it starts the CLI itself' : 'notify: it raises a toast and leaves the plan on disk', 'ok');
+  add('arming point', true, config.armOn === 'completion'
+    ? 'completion - it waits for the reply to finish, and stops waiting past ' + config.backstopAt + ' per cent'
+    : 'threshold - it arms the moment the window crosses ' + config.at + ' per cent, even mid-reply', 'ok');
+
+  // The one that has cost the most windows: a headless resume starts in the
+  // default permission mode, so a run that needs to edit a file stops and asks
+  // a person who is asleep.
+  if (config.mode === 'resume') {
+    add('permission mode', Boolean(config.permissionMode),
+      config.permissionMode
+        ? '--permission-mode ' + config.permissionMode
+        : 'not set - the resumed run will stop at the first approval and wait for nobody. Set: relay permission acceptEdits');
+  }
+
+  const cli = caps.claude || caps.codex;
+  add('a CLI to resume with', Boolean(cli), cli || 'neither the claude nor the codex CLI could be found on PATH');
+
+  const net = await require('./net.js').reachable({ timeoutMs: 8000 });
+  add('network to the API', net.online, net.detail,
+    net.online ? 'ok' : net.reason === 'intercepted' ? 'error' : 'warning');
+
+  // Can a task actually be registered by this account? Registering and removing
+  // a throwaway is the only honest answer; asking the policy is not.
+  if (process.platform === 'win32') {
+    const probeName = 'usage-limits-doctor-probe';
+    const registered = scheduleWindows(at + 6 * 60 * MINUTE, [path.join(__dirname, 'wake.js'), '--id', 'doctor-probe'], probeName, os.homedir(), at + 20000);
+    add('scheduled tasks', registered.ok, registered.ok
+      ? 'registered a test task via ' + registered.how + (registered.how === 'schtasks'
+        ? ' - the PowerShell path failed, so a sleeping machine will miss its wake'
+        : ' - StartWhenAvailable and WakeToRun are set, so a machine that was off or asleep still runs it')
+      : registered.error, registered.ok && registered.how === 'schtasks' ? 'warning' : undefined);
+    if (registered.ok) cancelSchedule(probeName);
+
+    // A wake at 3am is no use if the machine hibernates at midnight and the
+    // task is not allowed to wake it. This reads the actual power policy.
+    const power = spawnSync('powercfg.exe', ['/query', 'SCHEME_CURRENT', 'SUB_SLEEP'], { encoding: 'utf8', windowsHide: true, timeout: 8000 });
+    const denied = /Allow wake timers[\s\S]{0,600}?Current AC Power Setting Index: 0x00000000/i.test(power.stdout || '');
+    add('wake timers', !denied,
+      denied
+        ? 'wake timers are disabled on AC power, so a sleeping machine will not wake for the relay. Fix in Windows power settings, or: powercfg /setacvalueindex SCHEME_CURRENT SUB_SLEEP RTCWAKE 1'
+        : 'the power plan allows a scheduled task to wake this machine',
+      denied ? 'warning' : 'ok');
+  } else {
+    add('scheduled wake', true, 'posix: at(1) or launchd, checked at arming time', 'ok');
+  }
+
+  add('config directory writable', (() => {
+    try {
+      fs.mkdirSync(configDir(), { recursive: true });
+      const probe = path.join(configDir(), '.doctor');
+      fs.writeFileSync(probe, 'x');
+      fs.unlinkSync(probe);
+      return true;
+    } catch (err) {
+      return false;
+    }
+  })(), configDir());
+
+  if (state.armed) {
+    const continuation = readContinuation(state.armed.id);
+    add('continuation saved', Boolean(continuation && continuation.trim()),
+      continuation && continuation.trim()
+        ? continuation.trim().length + ' characters - the resumed run knows what it is picking up'
+        : 'nothing written. The wake would hand back only the todo list, which is thinner than a paragraph the session wrote itself. Use: relay note "<what to do next>"',
+      'warning');
+    add('wake time', Number.isFinite(state.armed.wakeAt),
+      new Date(state.armed.wakeAt).toLocaleString() + ' (' + formatWait(state.armed.wakeAt - at) + ' from now) via ' + state.armed.how);
+  } else {
+    add('armed', false, 'nothing is armed yet', 'warning');
+  }
+
+  const errors = checks.filter((c) => c.severity === 'error');
+  const warnings = checks.filter((c) => c.severity === 'warning');
+  const mark = (c) => (c.severity === 'ok' ? '  ok   ' : c.severity === 'warning' ? '  warn ' : '  FAIL ');
+  const lines = checks.map((c) => mark(c) + c.name.padEnd(26) + ' ' + c.detail);
+  lines.unshift(errors.length
+    ? errors.length + ' thing' + (errors.length === 1 ? '' : 's') + ' would stop the relay working.'
+    : warnings.length
+      ? 'Nothing would stop it, but ' + warnings.length + ' thing' + (warnings.length === 1 ? ' is' : 's are') + ' worth fixing.'
+      : 'Everything the relay needs is in place.');
+  lines.unshift('');
+  return { text: lines.join('\n'), checks, errors: errors.length, warnings: warnings.length };
+}
+
 /* ----------------------------------------------------------------- cli ---- */
 
 function main(argv) {
@@ -885,7 +1095,53 @@ function main(argv) {
   // tool into its rollouts, so nothing there ever reads as work to carry; and
   // a person can have a project in their head that is in no todo list.
   if (command === 'arm') return armByHand(rest);
+  if (command === 'armon' || command === 'arm-on') {
+    if (!['threshold', 'completion'].includes(String(value))) {
+      return 'Arming is "threshold" (the moment the window crosses the mark, mid-reply) or "completion" (the end of the reply).';
+    }
+    const config = configure({ armOn: value });
+    return config.armOn === 'completion'
+      ? 'Arming at completion. Crossing ' + config.at + ' per cent no longer arms anything by itself - the relay arms when the reply it is watching finishes, so what it carries is work that reached a boundary rather than a state it was halfway through. Past ' + config.backstopAt + ' per cent it stops waiting and arms anyway, because a completion that never comes is a relay that was never armed.'
+      : 'Arming at the threshold. It arms the moment the window crosses ' + config.at + ' per cent, even mid-reply.';
+  }
+  if (command === 'backstop') {
+    if (!value) return 'Give a percentage, for example: relay backstop 95';
+    const config = configure({ backstopAt: Number(value) });
+    return 'Past ' + config.backstopAt + ' per cent it stops waiting for a completion and arms immediately.';
+  }
+  if (command === 'show') {
+    const on = !['off', 'false', 'no', '0'].includes(String(value || 'on').toLowerCase());
+    configure({ show: on });
+    return on
+      ? 'The resumed run will open in a window you can see, and its full output is kept either way (relay log --run).'
+      : 'The resumed run will be invisible. Its output is still kept: relay log --run.';
+  }
+  if (command === 'onfailure' || command === 'on-failure') {
+    if (!['rearm', 'stop'].includes(String(value))) return 'On failure: "rearm" (try again next window) or "stop" (leave it to a person).';
+    const config = configure({ onFailure: value });
+    return config.onFailure === 'rearm'
+      ? 'A wake that fails will arm again for the next window rather than being lost, up to ' + config.maxRearms +
+        ' time' + (config.maxRearms === 1 ? '' : 's') + ' - so the work gets ' + (config.maxRearms + 1) + ' windows to happen in, and then it stops.'
+      : 'A wake that fails will stop and leave a note.';
+  }
+  if (command === 'rearms') {
+    if (!value) return 'Give a count, for example: relay rearms 2';
+    const config = configure({ maxRearms: Number(value) });
+    return 'A failing wake will arm itself again at most ' + config.maxRearms + ' time' + (config.maxRearms === 1 ? '' : 's') + '.';
+  }
+  if (command === 'offline') {
+    if (!value) return 'Give a number of retries, for example: relay offline 12';
+    const config = configure({ offlineAttempts: Number(value) });
+    return 'A machine that cannot reach the API will retry ' + config.offlineAttempts + ' times, ' +
+      config.offlineRetryMinutes + ' minutes apart at first and backing off from there. Being offline never counts as a failed run.';
+  }
+  if (command === 'doctor' || command === 'check') return doctor(Date.now()).then((r) => r.text);
   if (command === 'log') {
+    if (rest.includes('--run')) {
+      const latest = latestRunLog();
+      if (!latest) return 'No resumed run has been recorded yet.';
+      return latest.file + '\n\n' + latest.text.split('\n').slice(-120).join('\n');
+    }
     try {
       return fs.readFileSync(logFile(), 'utf8').split('\n').slice(-20).join('\n');
     } catch (err) {
@@ -893,7 +1149,10 @@ function main(argv) {
     }
   }
   return [
-    'usage: relay.js [status|on|off|at N|grace N|mode notify|resume|permission MODE|model NAME|thinking off|resume|always|arm [--session ID] [TEXT]|note TEXT|cancel|log]',
+    'usage: relay.js [status|on|off|at N|grace N|mode notify|resume|permission MODE|model NAME|',
+    '                 thinking off|resume|always|armon threshold|completion|backstop N|',
+    '                 show on|off|onfailure rearm|stop|offline N|doctor|',
+    '                 arm [--session ID] [TEXT]|note TEXT|cancel|log [--run]]',
     '',
     status(Date.now()),
   ].join('\n');
@@ -954,4 +1213,9 @@ module.exports = {
   disarm,
   status,
   formatWait,
+  doctor,
+  runLogDir,
+  runLogFile,
+  writeRunLog,
+  latestRunLog,
 };

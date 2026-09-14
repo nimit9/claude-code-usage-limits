@@ -101,7 +101,27 @@ test('nothing arms without a plan or an unfinished todo list', () =>
     assert.match(relay.armable({ config, binding: Object.assign({}, BINDING, { stale: true }), sessionId: 'a', work: WORK }).why, /stale/);
     assert.match(relay.armable({ config, binding: Object.assign({}, BINDING, { resetsAt: null }), sessionId: 'a', work: WORK }).why, /no known reset/);
     assert.match(relay.armable({ config: relay.configure({ enabled: false }), binding: BINDING, sessionId: 'a', work: WORK }).why, /is off/);
-    assert.strictEqual(relay.armable({ config, binding: BINDING, sessionId: 'a', work: WORK }).ok, true);
+    // Everything else satisfied, at a boundary: this is the arming case.
+    assert.strictEqual(relay.armable({ config, binding: BINDING, sessionId: 'a', work: WORK, atCompletion: true }).ok, true);
+  }));
+
+test('with armOn completion it waits for the end of the reply, and stops waiting at the backstop', () =>
+  withConfigDir(() => {
+    const config = relay.configure({ enabled: true, armOn: 'completion', at: 75, backstopAt: 95 });
+    // Mid-reply, past the mark but below the backstop: hold.
+    const midReply = relay.armable({ config, binding: BINDING, sessionId: 'a', work: WORK });
+    assert.strictEqual(midReply.ok, false);
+    assert.strictEqual(midReply.pending, true, 'holding is not the same as refusing');
+    assert.match(midReply.why, /waiting for this reply to finish/);
+    // The same call at a boundary arms.
+    assert.strictEqual(relay.armable({ config, binding: BINDING, sessionId: 'a', work: WORK, atCompletion: true }).ok, true);
+    // Past the backstop it stops waiting, because a completion that never
+    // comes - the limit cut the reply off - is a relay that never armed.
+    const past = relay.armable({ config, binding: Object.assign({}, BINDING, { percentUsed: 97 }), sessionId: 'a', work: WORK });
+    assert.strictEqual(past.ok, true, 'the backstop overrides the wait');
+    // And with armOn threshold the old behaviour is exactly as it was.
+    const old = relay.configure({ enabled: true, armOn: 'threshold' });
+    assert.strictEqual(relay.armable({ config: old, binding: BINDING, sessionId: 'a', work: WORK }).ok, true);
   }));
 
 test('the record carries the outstanding work, not just how much of it there was', () =>
