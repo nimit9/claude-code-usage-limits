@@ -1073,10 +1073,37 @@ function tierNow(options) {
     },
     running: {
       model: running,
-      effort: effort ? effort.effort : null,
+      effort: ultracodeName(effort ? effort.effort : null, sessionId, opts.now),
       source: effort ? effort.source : null,
     },
   };
+}
+
+// Ultracode reads as "xhigh" everywhere, and that is technically true and
+// practically wrong.
+//
+// Ultracode RESOLVES to xhigh, so every effort reader - the settings file, the
+// live transcript, CLAUDE_EFFORT - honestly reports xhigh, and the display said
+// xhigh at somebody who had typed ultracode. The two are the same amount of
+// reasoning and a very different amount of everything else, so a person who
+// asked for one and is shown the other has no way to tell it took.
+//
+// The plugin already knows. brief.js sets an ultracode flag on the session's
+// activity mark the moment the word appears in a prompt, and it STICKS for the
+// session because ultracode is a session-level trigger rather than a per-prompt
+// one. Nothing read it back. This does.
+//
+// Only xhigh is renamed. If some future effort is higher, reporting it as
+// ultracode would be a downgrade dressed up as a label, so it is left alone.
+function ultracodeName(effort, sessionId, now) {
+  if (effort !== 'xhigh' || !sessionId) return effort;
+  try {
+    const entry = require('./activity.js').read()[sessionId];
+    return entry && entry.ultracode ? 'ultracode' : effort;
+  } catch (err) {
+    // The real effort is a better answer than no answer.
+    return effort;
+  }
 }
 
 function sameFamily(a, b) {
@@ -1693,6 +1720,7 @@ module.exports = {
   adviceDecline,
   adviceMute,
   tierNow,
+  ultracodeName,
   topTier,
   tierLine,
   ledger,

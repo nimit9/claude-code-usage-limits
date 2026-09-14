@@ -1387,3 +1387,37 @@ test('the tier line asks for a decision only when the tier is dear', () => {
   assert.equal(mode.topTier('sonnet', 'medium'), false);
   assert.equal(mode.topTier(null, null), false, 'an unknown tier is not a prompt');
 });
+
+test('ultracode is reported as ultracode, not as the xhigh it resolves to', () => {
+  // Ultracode RESOLVES to xhigh, so every effort reader honestly reports xhigh
+  // and the display said xhigh at somebody who had asked for ultracode. Same
+  // reasoning, very different everything else, and no way to tell it took.
+  //
+  // The flag was already being recorded on the session's activity mark by
+  // brief.js and simply never read back.
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const saved = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-limits-uc-'));
+  try {
+    const activity = require('../skills/usage-limits/scripts/activity.js');
+    const now = Date.now();
+    activity.mark('working', 'asked-for-it', { ultracode: true }, now);
+    activity.mark('working', 'did-not', { ultracode: false }, now);
+
+    assert.equal(mode.ultracodeName('xhigh', 'asked-for-it', now), 'ultracode');
+    assert.equal(mode.ultracodeName('xhigh', 'did-not', now), 'xhigh');
+    // Only xhigh is renamed: calling a HIGHER effort "ultracode" would be a
+    // downgrade dressed up as a label.
+    assert.equal(mode.ultracodeName('max', 'asked-for-it', now), 'max');
+    assert.equal(mode.ultracodeName('high', 'asked-for-it', now), 'high');
+    // And it never invents one.
+    assert.equal(mode.ultracodeName('xhigh', null, now), 'xhigh');
+    assert.equal(mode.ultracodeName('xhigh', 'never-seen', now), 'xhigh');
+    assert.equal(mode.ultracodeName(null, 'asked-for-it', now), null);
+  } finally {
+    if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = saved;
+  }
+});
