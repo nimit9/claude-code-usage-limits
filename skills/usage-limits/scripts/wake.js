@@ -589,7 +589,8 @@ async function run(now, argv, overrides) {
     continuation,
     work: record.work && record.work.todos ? record.work : null,
     thinking: config.thinking !== 'off',
-    voice: voice.card(),
+    voice: config.voice === false ? null : voice.card(),
+    bugcheck: config.bugcheck,
   });
 
   let mode = config.mode;

@@ -29,6 +29,10 @@ The rest:
   (or whichever mode you want) as well: a resume does **not** inherit the
   session's permission mode, so without one it will sit waiting for an
   approval nobody is there to give. `show off` makes it a headless run instead.
+- `voice on|off` - carry how you write in the hand-off, so the resumed session
+  answers in your voice without being reminded. On by default.
+- `bugcheck on|off` - the hand-off asks for two bug passes before anything is
+  called done. On by default.
 - `thinking off|resume|always` - `resume` puts the word ultrathink into the
   prompt the relay delivers. `always` sets `alwaysThinkingEnabled` in your
   settings, backs the file up first, and applies to new sessions.

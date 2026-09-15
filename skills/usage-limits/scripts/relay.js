@@ -94,6 +94,11 @@ const DEFAULTS = {
   // it is also how you find out in the morning that nothing happened and have
   // no idea why.
   show: true,
+  // The hand-off carries how the user writes, so the resumed session answers
+  // in their voice without being reminded; and it asks for the two bug passes
+  // the user asks for on nearly every request. Both can be turned off.
+  voice: true,
+  bugcheck: 'on',
   // What happens after a wake fails for a reason that will not fix itself:
   // arm again for the next window, or stop and leave it to a person.
   onFailure: 'rearm',
@@ -250,6 +255,8 @@ function settings(state) {
     offlineAttempts: Math.min(48, Math.max(1, number(stored.offlineAttempts, DEFAULTS.offlineAttempts))),
     offlineRetryMinutes: Math.min(120, Math.max(2, number(stored.offlineRetryMinutes, DEFAULTS.offlineRetryMinutes))),
     show: bool(stored.show, DEFAULTS.show),
+    voice: bool(stored.voice, DEFAULTS.voice),
+    bugcheck: pick(stored.bugcheck, ['on', 'off'], DEFAULTS.bugcheck),
     onFailure: pick(stored.onFailure, ['rearm', 'stop'], DEFAULTS.onFailure),
     maxRearms: Math.min(10, Math.max(0, number(stored.maxRearms, DEFAULTS.maxRearms))),
     runLog: bool(stored.runLog, DEFAULTS.runLog),
@@ -389,6 +396,12 @@ function readContinuation(id) {
 // them and a form letter gets a form letter back. Written in the imperative,
 // because a resumed session that opens by asking what to do has wasted the
 // wake it was given.
+// Asked for on nearly every request, so the hand-off asks for it unprompted.
+const BUGCHECK_LINE =
+  'Before you call any of this done, check it for bugs twice: one full pass, then a second pass that assumes ' +
+  'the first missed something. The user asks for this on nearly every request, so do it without being asked, ' +
+  'unless the last turn already did both.';
+
 function compose(input) {
   const parts = [];
   const options = input || {};
@@ -415,6 +428,7 @@ function compose(input) {
     parts.push('The plan that was approved:\n\n' + work.plan);
   }
   parts.push('Verify anything that was mid-change before building on it: the last turn may have been cut off part-way through an edit.');
+  if (options.bugcheck !== false && options.bugcheck !== 'off') parts.push(BUGCHECK_LINE);
   const card = options.voice;
   if (card) parts.push('When you write back to the user, this is how they write:\n' + card);
   return parts.join('\n\n');
@@ -1285,6 +1299,21 @@ function main(argv) {
     const config = configure({ backstopAt: Number(value) });
     return 'Past ' + config.backstopAt + ' per cent it stops waiting for a completion and arms immediately.';
   }
+  if (command === 'voice') {
+    const on = !['off', 'false', 'no', '0'].includes(String(value || 'on').toLowerCase());
+    configure({ voice: on });
+    return on
+      ? 'The hand-off will carry how you write, so the resumed session answers in your voice without being reminded.'
+      : 'The hand-off will not carry how you write.';
+  }
+  if (command === 'bugcheck') {
+    const choice = pick(String(value || 'on').toLowerCase(), ['on', 'off'], null);
+    if (!choice) return 'Bug check: on (the hand-off asks for two passes) or off.';
+    configure({ bugcheck: choice });
+    if (choice === 'off') return 'Neither the hand-off nor the prompt hook will ask for the two bug passes.';
+    if (choice === 'always') return 'Every prompt, and the hand-off, will ask for two bug passes before anything is called done.';
+    return 'The hand-off will ask for two bug passes before anything is called done.';
+  }
   if (command === 'show') {
     const on = !['off', 'false', 'no', '0'].includes(String(value || 'on').toLowerCase());
     configure({ show: on });
@@ -1349,7 +1378,7 @@ if (require.main === module) {
     );
 }
 
-module.exports = {
+module.exports = { BUGCHECK_LINE,
   DEFAULTS,
   MINUTE,
   main,
