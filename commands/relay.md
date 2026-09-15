@@ -23,11 +23,12 @@ The rest:
   when the window opens; a request one second later has been refused before.
 - `mode notify` - raise a notification with the continuation ready to open.
   This is the default and it starts nothing by itself.
-- `mode resume` - at the wake, run the CLI in the project directory and hand
-  the continuation back to the same conversation. Say `permission acceptEdits`
-  (or whichever mode you want) as well: a headless resume does **not** inherit
-  the session's permission mode, so without one it will sit waiting for an
-  approval nobody is there to give.
+- `mode resume` - at the wake, resume the same conversation in a window you can
+  see, with Remote Control on, so it is also on claude.ai/code and the phone;
+  the first prompt points it at the hand-off file. Say `permission acceptEdits`
+  (or whichever mode you want) as well: a resume does **not** inherit the
+  session's permission mode, so without one it will sit waiting for an
+  approval nobody is there to give. `show off` makes it a headless run instead.
 - `thinking off|resume|always` - `resume` puts the word ultrathink into the
   prompt the relay delivers. `always` sets `alwaysThinkingEnabled` in your
   settings, backs the file up first, and applies to new sessions.

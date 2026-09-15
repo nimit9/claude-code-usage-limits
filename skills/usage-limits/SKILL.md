@@ -664,8 +664,10 @@ them, and do not promise behaviour it does not have:
   input to a shell on purpose; the relay uses it only to tell whether somebody
   is at the keyboard, and to show a banner.
 - In `notify` mode — the default — it raises a notification and starts nothing.
-- The resumed run opens in a window you can see. `relay show off` hides it; the
-  output is kept either way.
+- The resumed run is a real interactive session in its own window, with Remote
+  Control on (named `usage-limits relay <project>` on claude.ai/code and the
+  phone), and its first prompt points it at the hand-off file. `relay show off`
+  makes it a headless `claude -p` run instead; the output is kept either way.
 - In `resume` mode it runs the CLI itself. A headless resume does **not**
   inherit the session's permission mode, so unless one was set the resumed run
   will sit waiting for an approval nobody is there to give.

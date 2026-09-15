@@ -197,7 +197,192 @@ function spawnOptionsFor(record, config, cli) {
   };
 }
 
-function deliverClaude(record, prompt, config, cli, runs) {
+// The window that says "Claude" and nothing else.
+//
+// On 2026-09-14 the 8:05 PM relay fired, resumed the session and worked - in
+// a console window that showed only its title. `claude -p` prints its result
+// when it has finished and nothing before, the wake was capturing both
+// streams for the run log anyway, and a headless run does not register with
+// Remote Control, so the phone showed nothing either. The user's words: "just
+// a blank terminal screen that says Claude".
+//
+// So when the run is meant to be seen (relay show, the default) it is a real
+// interactive session in its own window: resumed by id, model and permission
+// mode set, Remote Control on under a name that says what it is, and the
+// first prompt given as a short argument that points at the hand-off on
+// disk. The hand-off itself cannot ride on argv (8,191 characters) and an
+// interactive session's stdin is its keyboard, so the file is the one
+// channel that fits every length. The session reads it with one tool call
+// and carries on, and from then on it is a session like any other: on
+// screen, on claude.ai/code, and typed into.
+//
+// The launcher is a .cmd file rather than a command line, so the only
+// quoting rules that have to hold are cmd's own, applied to text this code
+// wrote. `call` matters: claude.cmd is itself a batch file, and a batch file
+// run without call never returns to the lines below it - the exit code
+// would never be written and a failure would close the window unread.
+const LAUNCH_GRACE_MS = 20000;
+
+function wakePromptFile(id) {
+  return path.join(relay.configDir(), 'relay-wake-' + id + '.md');
+}
+
+function launcherFile(id) {
+  return path.join(relay.configDir(), 'relay-wake-' + id + '.cmd');
+}
+
+function exitFile(id) {
+  return path.join(relay.configDir(), 'relay-wake-' + id + '.exit');
+}
+
+// Short, plain, and free of quotes: it goes through cmd and then argv.
+function pointerPrompt(file) {
+  return (
+    'The usage window has reset and this is the plugin picking the work back up, not a new request. ' +
+    'The full hand-off is in the file ' + file + ' - read it with the Read tool now and carry on from it ' +
+    'at full quality, without re-asking what to do.'
+  );
+}
+
+// Doubled percent signs are the one escape cmd needs inside double quotes;
+// a double quote itself has no escape there, so it is dropped.
+function cmdArg(text) {
+  return '"' + String(text).replace(/%/g, '%%').replace(/"/g, '') + '"';
+}
+
+function visibleArgs(record, config, promptFile) {
+  const args = ['--resume', record.id];
+  if (config && config.permissionMode) args.push('--permission-mode', config.permissionMode);
+  if (config && config.model) args.push('--model', config.model);
+  args.push('--remote-control', 'usage-limits relay ' + (record.project || path.basename(record.cwd)));
+  args.push(pointerPrompt(promptFile));
+  return args;
+}
+
+function launcherScript(record, config, cli, promptFile, exitPath) {
+  const name = String(record.project || path.basename(record.cwd)).replace(/[&|<>^%"]/g, '');
+  return [
+    '@echo off',
+    'title Claude relay - ' + name,
+    'cd /d ' + cmdArg(record.cwd),
+    'call ' + cmdArg(cli) + ' ' + visibleArgs(record, config, promptFile).map(cmdArg).join(' '),
+    'set CODE=%ERRORLEVEL%',
+    '> ' + cmdArg(exitPath) + ' echo %CODE%',
+    'if not "%CODE%"=="0" (',
+    '  echo.',
+    '  echo [usage-limits relay] claude exited with code %CODE%. The window stays open so the message above can be read; the plan is still on disk.',
+    '  pause >nul',
+    ')',
+    '',
+  ].join('\r\n');
+}
+
+// `claude --resume` finds a session by its transcript, one folder per project
+// under the config dir. Checking first means a session that is gone gets the
+// same permanent answer the headless path gives, without opening a window
+// whose only content would be the error.
+function transcriptExists(id) {
+  const root = path.join(relay.configDir(), 'projects');
+  try {
+    for (const dir of fs.readdirSync(root)) {
+      if (fs.existsSync(path.join(root, dir, id + '.jsonl'))) return true;
+    }
+  } catch (err) {
+    // No projects folder at all.
+  }
+  return false;
+}
+
+function readExit(file) {
+  try {
+    const code = parseInt(fs.readFileSync(file, 'utf8').trim(), 10);
+    return Number.isFinite(code) ? code : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// `start` returns as soon as the window exists; the launcher runs on in it.
+// Pre-quoted arguments go through verbatim, because Node's own quoting is
+// for programs that parse like C, and cmd does not.
+function openWindow(launcher, exitPath, record) {
+  const run = spawnSync('cmd.exe', ['/d', '/c', 'start', '"Claude relay"', '/D', cmdArg(record.cwd), cmdArg(launcher)], {
+    encoding: 'utf8',
+    timeout: 30000,
+    windowsHide: true,
+    windowsVerbatimArguments: true,
+  });
+  if (run.status !== 0) throw new Error(((run.stderr || run.stdout || '') + '').trim().split('\n')[0] || 'start exited ' + run.status);
+}
+
+// `io` exists so the window path can be tested without a window: open, sleep
+// and now are the three things it does to the world.
+function deliverVisible(record, prompt, config, cli, runs, io) {
+  const ops = Object.assign({ open: openWindow, sleep: sleepMs, now: Date.now }, io || null);
+  if (!transcriptExists(record.id)) {
+    return {
+      ok: false,
+      permanent: true,
+      error:
+        'the session ' + String(record.id).slice(0, 8) + ' no longer exists, so there was nothing to resume. ' +
+        'The plan is still on disk: run "claude" in ' + record.cwd + ' and paste it in.',
+    };
+  }
+  const promptFile = wakePromptFile(record.id);
+  const launcher = launcherFile(record.id);
+  const exitPath = exitFile(record.id);
+  try {
+    fs.mkdirSync(relay.configDir(), { recursive: true });
+    fs.writeFileSync(promptFile, String(prompt == null ? '' : prompt) + '\n');
+    fs.writeFileSync(launcher, launcherScript(record, config, cli, promptFile, exitPath));
+    try {
+      fs.unlinkSync(exitPath);
+    } catch (err) {
+      // None left from last time.
+    }
+  } catch (err) {
+    return { ok: false, error: 'could not write the launcher: ' + err.message };
+  }
+  try {
+    ops.open(launcher, exitPath, record);
+  } catch (err) {
+    appendRun(runs, 'claude --resume (window)', { status: 1, stdout: '', stderr: err.message });
+    return { ok: false, error: 'could not open a window: ' + err.message };
+  }
+  const started = ops.now();
+  while (ops.now() - started < LAUNCH_GRACE_MS) {
+    ops.sleep(1000);
+    const code = readExit(exitPath);
+    if (code !== null) {
+      const after = Math.round((ops.now() - started) / 1000);
+      appendRun(runs, 'claude --resume (window)', {
+        status: code,
+        stdout: '',
+        stderr: 'exited within ' + after + 's; its output is in the window, which stays open when the exit is not 0',
+      });
+      if (code === 0) return { ok: true, how: 'claude --resume in a window' };
+      return { ok: false, error: 'claude exited ' + code + ' in the window it opened (left open so the message can be read)' };
+    }
+  }
+  appendRun(runs, 'claude --resume (window)', {
+    status: 0,
+    stdout:
+      'still running after ' + Math.round(LAUNCH_GRACE_MS / 1000) + 's: an interactive session in its own window, Remote Control on. ' +
+      'Its output is on screen and in the session transcript, not in this log.',
+    stderr: '',
+  });
+  return { ok: true, how: 'claude --resume in a window, Remote Control on' };
+}
+function deliverClaude(record, prompt, config, cli, runs, io) {
+  // Seen by default. relay show off keeps the headless run, and so does any
+  // platform without the window launcher yet (it is Windows-only so far).
+  if (config && config.show !== false && (io || process.platform === 'win32')) {
+    return deliverVisible(record, prompt, config, cli, runs, io);
+  }
   const args = claudeArgs(record, prompt, config, false);
   // stdin, never argv. See claudeArgs for the 7.5 KB note that proved why.
   const options = Object.assign(spawnOptionsFor(record, config, cli), { input: String(prompt == null ? '' : prompt) });
@@ -541,4 +726,4 @@ if (require.main === module) {
   );
 }
 
-module.exports = { run, toast, userIsPresent, claudeArgs, deliverClaude, deliverCodex, windowReopened, argOf, appendRun, spawnOptionsFor };
+module.exports = { visibleArgs, launcherScript, pointerPrompt, transcriptExists, wakePromptFile, LAUNCH_GRACE_MS, run, toast, userIsPresent, claudeArgs, deliverClaude, deliverCodex, windowReopened, argOf, appendRun, spawnOptionsFor };

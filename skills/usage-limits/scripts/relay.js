@@ -1289,7 +1289,7 @@ function main(argv) {
     const on = !['off', 'false', 'no', '0'].includes(String(value || 'on').toLowerCase());
     configure({ show: on });
     return on
-      ? 'The resumed run will open in a window you can see, and its full output is kept either way (relay log --run).'
+      ? 'The resumed run will be a session in a window you can see, with Remote Control on; a headless run keeps its output in relay log --run.'
       : 'The resumed run will be invisible. Its output is still kept: relay log --run.';
   }
   if (command === 'onfailure' || command === 'on-failure') {
