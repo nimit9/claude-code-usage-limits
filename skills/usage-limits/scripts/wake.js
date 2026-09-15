@@ -265,6 +265,12 @@ function launcherScript(record, config, cli, promptFile, exitPath) {
     '@echo off',
     'title Claude relay - ' + name,
     'cd /d ' + cmdArg(record.cwd),
+    // Seen live on 2026-09-14: launched from inside a session, the window
+    // inherited that session's markers - transcript saving was off (the
+    // child-session marker) and the hooks took it for the parent (its id).
+    // The resumed session is nobody's child, whoever opened the window.
+    'set CLAUDE_CODE_CHILD_SESSION=',
+    'set CLAUDE_CODE_SESSION_ID=',
     'call ' + cmdArg(cli) + ' ' + visibleArgs(record, config, promptFile).map(cmdArg).join(' '),
     'set CODE=%ERRORLEVEL%',
     '> ' + cmdArg(exitPath) + ' echo %CODE%',

@@ -60,6 +60,10 @@ test('the launcher calls claude.cmd, doubles percent signs and keeps a failed wi
   assert.ok(script.includes('> "C:\\cfg\\p.exit" echo %CODE%'), 'the exit code is written for the wake to read');
   assert.ok(script.includes('pause >nul'), 'a failed window stays open to be read');
   assert.ok(script.includes('title Claude relay - proj'));
+  // Launched from inside a session, the window inherited its markers and
+  // ran with transcript saving off; the launcher clears them first.
+  assert.ok(script.includes('\r\nset CLAUDE_CODE_CHILD_SESSION=\r\n'), 'nobody\'s child');
+  assert.ok(script.includes('\r\nset CLAUDE_CODE_SESSION_ID=\r\n'), 'its own id for the hooks');
 });
 
 test('a visible resume of a session with no transcript is permanent and opens nothing', () =>
