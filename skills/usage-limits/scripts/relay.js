@@ -1307,7 +1307,9 @@ function main(argv) {
       : 'The hand-off will not carry how you write.';
   }
   if (command === 'bugcheck') {
-    const choice = pick(String(value || 'on').toLowerCase(), ['on', 'off'], null);
+    // pick() is local to settings(); the command checks the value itself.
+    const wanted = String(value || 'on').toLowerCase();
+    const choice = ['on', 'off'].includes(wanted) ? wanted : null;
     if (!choice) return 'Bug check: on (the hand-off asks for two passes) or off.';
     configure({ bugcheck: choice });
     if (choice === 'off') return 'Neither the hand-off nor the prompt hook will ask for the two bug passes.';
