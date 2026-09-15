@@ -27,7 +27,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 
 const relay = require('./relay.js');
 const net = require('./net.js');
@@ -192,7 +192,9 @@ function spawnOptionsFor(record, config, cli) {
     encoding: 'utf8',
     cwd: record.cwd,
     timeout: RESUME_TIMEOUT_MS,
-    windowsHide: config && config.show === false,
+    // Always. The seen run is the interactive window (deliverVisible); this
+    // headless one shared the wake's console once and died with it.
+    windowsHide: true,
     shell: process.platform === 'win32' && /\.(cmd|bat)$/i.test(cli),
   };
 }
@@ -228,7 +230,7 @@ function wakePromptFile(id) {
 }
 
 function launcherFile(id) {
-  return path.join(relay.configDir(), 'relay-wake-' + id + '.cmd');
+  return path.join(relay.configDir(), 'relay-wake-' + id + (process.platform === 'win32' ? '.cmd' : '.sh'));
 }
 
 function exitFile(id) {
@@ -325,10 +327,63 @@ function openWindow(launcher, exitPath, record) {
   if (run.status !== 0) throw new Error(((run.stderr || run.stdout || '') + '').trim().split('\n')[0] || 'start exited ' + run.status);
 }
 
+// The same window on macOS and Linux. UNVERIFIED on a real Mac or Linux box:
+// written from the documented behaviour of osascript and the common terminal
+// emulators, with the launcher script itself under test. The shell quoting
+// is the POSIX one: close the quote, escape one, reopen.
+const Q = String.fromCharCode(39);
+function shQuote(text) {
+  return Q + String(text).split(Q).join(Q + String.fromCharCode(92) + Q + Q) + Q;
+}
+
+function launcherScriptPosix(record, config, cli, promptFile, exitPath) {
+  return [
+    '#!/bin/sh',
+    'cd ' + shQuote(record.cwd) + ' || exit 1',
+    'unset CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID',
+    shQuote(cli) + ' ' + visibleArgs(record, config, promptFile).map(shQuote).join(' '),
+    'code=$?',
+    'echo "$code" > ' + shQuote(exitPath),
+    'if [ "$code" -ne 0 ]; then',
+    '  echo',
+    '  echo "[usage-limits relay] claude exited with code $code. This window stays open so the message above can be read; the plan is still on disk."',
+    '  read -r _',
+    'fi',
+    '',
+  ].join(String.fromCharCode(10));
+}
+
+function hasCommand(name) {
+  const run = spawnSync('sh', ['-c', 'command -v ' + shQuote(name)], { encoding: 'utf8', timeout: 10000 });
+  return run.status === 0;
+}
+
+function openWindowPosix(launcher) {
+  fs.chmodSync(launcher, 0o755);
+  if (process.platform === 'darwin') {
+    const run = spawnSync('osascript', ['-e', 'tell application "Terminal" to do script ' + JSON.stringify('sh ' + shQuote(launcher))], { encoding: 'utf8', timeout: 30000 });
+    if (run.status !== 0) throw new Error(((run.stderr || run.stdout || '') + '').trim().split(String.fromCharCode(10))[0] || 'osascript exited ' + run.status);
+    return;
+  }
+  const terminals = [
+    ['x-terminal-emulator', ['-e', 'sh', launcher]],
+    ['gnome-terminal', ['--', 'sh', launcher]],
+    ['konsole', ['-e', 'sh', launcher]],
+    ['xterm', ['-e', 'sh', launcher]],
+  ];
+  for (const [bin, args] of terminals) {
+    if (!hasCommand(bin)) continue;
+    const child = spawn(bin, args, { detached: true, stdio: 'ignore' });
+    child.unref();
+    return;
+  }
+  throw new Error('no terminal emulator found (tried x-terminal-emulator, gnome-terminal, konsole, xterm)');
+}
+
 // `io` exists so the window path can be tested without a window: open, sleep
 // and now are the three things it does to the world.
 function deliverVisible(record, prompt, config, cli, runs, io) {
-  const ops = Object.assign({ open: openWindow, sleep: sleepMs, now: Date.now }, io || null);
+  const ops = Object.assign({ open: process.platform === 'win32' ? openWindow : openWindowPosix, sleep: sleepMs, now: Date.now }, io || null);
   if (!transcriptExists(record.id)) {
     return {
       ok: false,
@@ -344,7 +399,9 @@ function deliverVisible(record, prompt, config, cli, runs, io) {
   try {
     fs.mkdirSync(relay.configDir(), { recursive: true });
     fs.writeFileSync(promptFile, String(prompt == null ? '' : prompt) + '\n');
-    fs.writeFileSync(launcher, launcherScript(record, config, cli, promptFile, exitPath));
+    fs.writeFileSync(launcher, process.platform === 'win32'
+      ? launcherScript(record, config, cli, promptFile, exitPath)
+      : launcherScriptPosix(record, config, cli, promptFile, exitPath));
     try {
       fs.unlinkSync(exitPath);
     } catch (err) {
@@ -357,7 +414,7 @@ function deliverVisible(record, prompt, config, cli, runs, io) {
     ops.open(launcher, exitPath, record);
   } catch (err) {
     appendRun(runs, 'claude --resume (window)', { status: 1, stdout: '', stderr: err.message });
-    return { ok: false, error: 'could not open a window: ' + err.message };
+    return { ok: false, openFailed: true, error: 'could not open a window: ' + err.message };
   }
   const started = ops.now();
   while (ops.now() - started < LAUNCH_GRACE_MS) {
@@ -384,10 +441,11 @@ function deliverVisible(record, prompt, config, cli, runs, io) {
   return { ok: true, how: 'claude --resume in a window, Remote Control on' };
 }
 function deliverClaude(record, prompt, config, cli, runs, io) {
-  // Seen by default. relay show off keeps the headless run, and so does any
-  // platform without the window launcher yet (it is Windows-only so far).
-  if (config && config.show !== false && (io || process.platform === 'win32')) {
-    return deliverVisible(record, prompt, config, cli, runs, io);
+  // Seen by default. relay show off keeps the headless run, and so does a
+  // machine where no window could be opened (no terminal emulator found).
+  if (config && config.show !== false) {
+    const visible = deliverVisible(record, prompt, config, cli, runs, io);
+    if (!visible.openFailed) return visible;
   }
   const args = claudeArgs(record, prompt, config, false);
   // stdin, never argv. See claudeArgs for the 7.5 KB note that proved why.
@@ -490,6 +548,10 @@ async function run(now, argv, overrides) {
   const record = state.armed;
   if (!record) return { outcome: 'nothing-armed' };
   if (id && record.id !== id) return { outcome: 'superseded' };
+  // Marked before anything else, so a wake that dies part-way (the 8:05 PM
+  // one was killed with its console) is told apart from one that never ran.
+  record.wokeAt = now;
+  relay.write(state);
 
   const config = relay.settings(state);
   const capabilities = deps.capabilities();
@@ -733,4 +795,4 @@ if (require.main === module) {
   );
 }
 
-module.exports = { visibleArgs, launcherScript, pointerPrompt, transcriptExists, wakePromptFile, LAUNCH_GRACE_MS, run, toast, userIsPresent, claudeArgs, deliverClaude, deliverCodex, windowReopened, argOf, appendRun, spawnOptionsFor };
+module.exports = { launcherScriptPosix, shQuote, visibleArgs, launcherScript, pointerPrompt, transcriptExists, wakePromptFile, LAUNCH_GRACE_MS, run, toast, userIsPresent, claudeArgs, deliverClaude, deliverCodex, windowReopened, argOf, appendRun, spawnOptionsFor };

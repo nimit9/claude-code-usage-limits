@@ -1487,7 +1487,7 @@ if (require.main === module) {
           };
           process.stdout.write(JSON.stringify(payload) + '\n');
         } else {
-          if (text) process.stdout.write(text + '\n');
+          if (text) process.stdout.write(withBugcheck(text) + '\n');
         }
         process.exit(0);
       },
@@ -1498,7 +1498,19 @@ if (require.main === module) {
     );
 }
 
-module.exports = {
+// relay bugcheck always: the two passes the user asks for on nearly every
+// request, asked for on every prompt. on and off touch the hand-off only.
+function withBugcheck(text) {
+  try {
+    const relayModule = require('./relay.js');
+    if (relayModule.settings(relayModule.read()).bugcheck === 'always') return text + ' ' + relayModule.BUGCHECK_LINE;
+  } catch (err) {
+    // The relay module is optional here.
+  }
+  return text;
+}
+
+module.exports = { withBugcheck,
   DEFAULTS,
   aheadOfPace,
   pacingMatters,

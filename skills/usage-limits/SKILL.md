@@ -668,6 +668,9 @@ them, and do not promise behaviour it does not have:
   Control on (named `usage-limits relay <project>` on claude.ai/code and the
   phone), and its first prompt points it at the hand-off file. `relay show off`
   makes it a headless `claude -p` run instead; the output is kept either way.
+  macOS and Linux open the same window in Terminal (unverified there). A saved
+  continuation counts as work to carry, so a session with a note but no todo
+  list still arms; and a wake that never reports back is reaped as "lost".
 - In `resume` mode it runs the CLI itself. A headless resume does **not**
   inherit the session's permission mode, so unless one was set the resumed run
   will sit waiting for an approval nobody is there to give.

@@ -256,7 +256,7 @@ function settings(state) {
     offlineRetryMinutes: Math.min(120, Math.max(2, number(stored.offlineRetryMinutes, DEFAULTS.offlineRetryMinutes))),
     show: bool(stored.show, DEFAULTS.show),
     voice: bool(stored.voice, DEFAULTS.voice),
-    bugcheck: pick(stored.bugcheck, ['on', 'off'], DEFAULTS.bugcheck),
+    bugcheck: pick(stored.bugcheck, ['on', 'always', 'off'], DEFAULTS.bugcheck),
     onFailure: pick(stored.onFailure, ['rearm', 'stop'], DEFAULTS.onFailure),
     maxRearms: Math.min(10, Math.max(0, number(stored.maxRearms, DEFAULTS.maxRearms))),
     runLog: bool(stored.runLog, DEFAULTS.runLog),
@@ -675,17 +675,36 @@ function verifyRegistration(state, next, wanted, now) {
   return { ok: true, nextRun: at };
 }
 
+const HIDDEN_HOST = path.join(process.env.SystemRoot || 'C:' + path.sep + 'Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+
+// The task used to run node.exe directly, and node.exe is a console program:
+// under the scheduler, in an interactive session, it gets a console window
+// of its own. That was the "blank terminal that says Claude" - the wake's own
+// console, shared by its headless child - and closing it killed both (task
+// result 0xC000013A), so the wake never wrote its outcome. PowerShell can
+// start hidden and node inherits that; the session the wake opens for the
+// user is a new window (cmd /c start) and stays visible.
+function hiddenAction(argv, cwd) {
+  const command = '& ' + [process.execPath].concat(argv).map(psQuote).join(' ');
+  return {
+    execute: HIDDEN_HOST,
+    argument: '-NoProfile -NonInteractive -WindowStyle Hidden -Command "' + command + '"',
+    cwd: cwd || os.homedir(),
+  };
+}
+
 function scheduleWindows(when, argv, name, cwd, deadline) {
   let lastVerifyError = null;
   const date = new Date(when);
   const stamp =
     date.getFullYear() + '-' + two(date.getMonth() + 1) + '-' + two(date.getDate()) + ' ' +
     two(date.getHours()) + ':' + two(date.getMinutes()) + ':' + two(date.getSeconds());
-  const argument = argv.map(winArg).join(' ');
+  const action = hiddenAction(argv, cwd);
+  const argument = action.argument;
   const script = [
     '$ErrorActionPreference = "Stop"',
-    '$action = New-ScheduledTaskAction -Execute ' + psQuote(process.execPath) +
-      ' -Argument ' + psQuote(argument) + ' -WorkingDirectory ' + psQuote(cwd || os.homedir()),
+    '$action = New-ScheduledTaskAction -Execute ' + psQuote(action.execute) +
+      ' -Argument ' + psQuote(action.argument) + ' -WorkingDirectory ' + psQuote(action.cwd),
     '$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date ' + psQuote(stamp) + ')',
     // A one-shot task does not remove itself. Without an expiry, every relay
     // leaves a dead entry in Task Scheduler forever; the wake also unregisters
@@ -824,6 +843,51 @@ function cancelSchedule(name) {
 
 // Everything that has to be true before a wake is scheduled, in the order that
 // makes the answer most useful to read.
+// A saved continuation is work by definition: the session wrote down what
+// comes next. On 2026-09-14 a session with an 8 KB note and no todo list hit
+// 100 per cent and was refused for having "no plan or unfinished todo list",
+// so nothing picked it up after the reset.
+function workWithContinuation(work, id) {
+  const base = work || { hasWork: false, pending: 0, source: null, todos: [], plan: null };
+  if (base.hasWork) return base;
+  const saved = id ? readContinuation(id) : '';
+  if (!saved) return base;
+  return Object.assign({}, base, { hasWork: true, pending: Math.max(1, base.pending || 0), source: 'continuation' });
+}
+
+// A wake that fired and never reported back. The 8:05 PM wake on 2026-09-14
+// was killed with its console (task result 0xC000013A), so finish() never
+// ran: the record stayed armed for a wake that was already over, its task
+// stayed registered, and status said "wake in now" for hours. A wake marks
+// wokeAt as its first act; a record past its wake with no mark for half an
+// hour never started, and one marked but silent for longer than a resume
+// can run has died. Either way it is history, and the slot is free.
+const LOST_UNSTARTED_MS = 30 * MINUTE;
+const LOST_RUNNING_MS = 3 * 60 * MINUTE + 10 * MINUTE;
+function reapLost(now) {
+  const state = read();
+  const armed = state.armed;
+  if (!armed || !Number.isFinite(armed.wakeAt)) return false;
+  const limit = Number.isFinite(armed.wokeAt) ? armed.wokeAt + LOST_RUNNING_MS : armed.wakeAt + LOST_UNSTARTED_MS;
+  if (now < limit) return false;
+  const detail = Number.isFinite(armed.wokeAt)
+    ? 'the wake started ' + new Date(armed.wokeAt).toISOString() + ' and never reported back'
+    : 'the wake was due ' + new Date(armed.wakeAt).toISOString() + ' and never started, or died before it could say so';
+  state.history.push(Object.assign({}, armed, { endedAt: now, outcome: 'lost', detail }));
+  state.history = state.history.slice(-10);
+  state.armed = null;
+  write(state);
+  note('lost ' + armed.id + ': ' + detail, now);
+  if (armed.task) {
+    try {
+      cancelSchedule(armed.task);
+    } catch (err) {
+      // The expiry set at registration removes it either way.
+    }
+  }
+  return true;
+}
+
 function armable(input) {
   const options = input || {};
   const config = options.config || settings();
@@ -834,7 +898,8 @@ function armable(input) {
   if (binding.percentUsed < config.at) return { ok: false, why: 'below ' + config.at + ' per cent' };
   if (!Number.isFinite(binding.resetsAt)) return { ok: false, why: 'the window has no known reset time' };
   if (!options.sessionId) return { ok: false, why: 'no session id' };
-  if (!options.work || !options.work.hasWork) return { ok: false, why: 'no plan or unfinished todo list to carry' };
+  const work = workWithContinuation(options.work, options.sessionId);
+  if (!work.hasWork) return { ok: false, why: 'no plan or unfinished todo list to carry, and no saved continuation' };
   // The boundary rule. Past the threshold but not yet at the backstop, arming
   // waits for the reply to finish - the Stop hook passes atCompletion and this
   // is the only caller that does. Mid-reply callers get told to wait, and the
@@ -853,6 +918,8 @@ function arm(input) {
   const options = input || {};
   const now = Number.isFinite(options.now) ? options.now : Date.now();
   const config = options.config || settings();
+  reapLost(now);
+  options.work = workWithContinuation(options.work, options.sessionId);
   // `at` is an exact wake time, for work deferred to a moment somebody named
   // rather than to a window reset. The grace minutes exist so the meter has
   // really turned over before a resume fires; a time a person typed does not
@@ -992,6 +1059,7 @@ function formatWait(ms) {
 
 function status(now) {
   const at = Number.isFinite(now) ? now : Date.now();
+  reapLost(at);
   const state = read();
   const config = settings(state);
   const able = capabilities();
@@ -1309,8 +1377,8 @@ function main(argv) {
   if (command === 'bugcheck') {
     // pick() is local to settings(); the command checks the value itself.
     const wanted = String(value || 'on').toLowerCase();
-    const choice = ['on', 'off'].includes(wanted) ? wanted : null;
-    if (!choice) return 'Bug check: on (the hand-off asks for two passes) or off.';
+    const choice = ['on', 'always', 'off'].includes(wanted) ? wanted : null;
+    if (!choice) return 'Bug check: on (the hand-off asks for two passes), always (every prompt does), or off.';
     configure({ bugcheck: choice });
     if (choice === 'off') return 'Neither the hand-off nor the prompt hook will ask for the two bug passes.';
     if (choice === 'always') return 'Every prompt, and the hand-off, will ask for two bug passes before anything is called done.';
@@ -1380,7 +1448,7 @@ if (require.main === module) {
     );
 }
 
-module.exports = { BUGCHECK_LINE,
+module.exports = { workWithContinuation, reapLost, hiddenAction, BUGCHECK_LINE,
   DEFAULTS,
   MINUTE,
   main,

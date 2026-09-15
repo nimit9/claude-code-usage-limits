@@ -31,8 +31,8 @@ The rest:
   approval nobody is there to give. `show off` makes it a headless run instead.
 - `voice on|off` - carry how you write in the hand-off, so the resumed session
   answers in your voice without being reminded. On by default.
-- `bugcheck on|off` - the hand-off asks for two bug passes before anything is
-  called done. On by default.
+- `bugcheck on|always|off` - the hand-off asks for two bug passes before anything
+  is called done; `always` asks on every prompt as well. On by default.
 - `thinking off|resume|always` - `resume` puts the word ultrathink into the
   prompt the relay delivers. `always` sets `alwaysThinkingEnabled` in your
   settings, backs the file up first, and applies to new sessions.
