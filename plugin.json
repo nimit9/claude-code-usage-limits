@@ -1,6 +1,6 @@
 {
   "name": "usage-limits",
-  "version": "1.34.0",
+  "version": "1.34.1",
   "description": "Usage limits, budget tracking, and quota monitoring for Gemini, Claude Code, and Codex",
   "author": {
     "name": "Gev"

@@ -71,7 +71,7 @@ function bindingFromCollect(collected, now) {
 function armAtCompletion(now, hookInput, sessionId) {
   let state;
   try {
-    state = relay.read();
+    state = (relay.reapLost(Date.now()), relay.read());
   } catch (err) {
     return null;
   }

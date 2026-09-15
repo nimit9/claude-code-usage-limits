@@ -365,6 +365,7 @@ function openWindowPosix(launcher) {
     if (run.status !== 0) throw new Error(((run.stderr || run.stdout || '') + '').trim().split(String.fromCharCode(10))[0] || 'osascript exited ' + run.status);
     return;
   }
+  if (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) throw new Error('no DISPLAY or WAYLAND_DISPLAY: not a graphical session');
   const terminals = [
     ['x-terminal-emulator', ['-e', 'sh', launcher]],
     ['gnome-terminal', ['--', 'sh', launcher]],
@@ -521,6 +522,13 @@ function finish(state, record, outcome, detail, now) {
     Object.assign({}, record, { endedAt: now, outcome, detail: detail || null })
   );
   state.history = state.history.slice(-10);
+  if (outcome === 'resumed') {
+    try {
+      fs.unlinkSync(relay.planFile(record.id));
+    } catch (err) {
+      // No note, or already gone.
+    }
+  }
   state.armed = null;
   relay.write(state);
   relay.note('wake ' + record.id + ': ' + outcome + (detail ? ' - ' + detail : ''), now);

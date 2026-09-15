@@ -1096,7 +1096,7 @@ function tallyContext(all, sessionId, now) {
 // about.
 function relayState(now, hookInput, binding, sessionId) {
   try {
-    const state = relay.read();
+    const state = (relay.reapLost(Date.now()), relay.read());
     const config = relay.settings(state);
     const last = state.history[state.history.length - 1];
     const recent = last && Number.isFinite(last.endedAt) && now - last.endedAt < 6 * 60 * 60 * 1000 ? last : null;
@@ -1483,7 +1483,7 @@ if (require.main === module) {
       ({ text, isGeminiHook }) => {
         if (isGeminiHook) {
           const payload = {
-            injectSteps: text ? [{ ephemeralMessage: text }] : []
+            injectSteps: text ? [{ ephemeralMessage: withBugcheck(text) }] : []
           };
           process.stdout.write(JSON.stringify(payload) + '\n');
         } else {

@@ -760,7 +760,7 @@ function scheduleWindows(when, argv, name, cwd, deadline) {
     // guarantee and says so rather than pretending the two are the same.
     const fallback = spawnSync(
       'schtasks.exe',
-      ['/Create', '/TN', name, '/TR', '"' + process.execPath + '" ' + argument, '/SC', 'ONCE',
+      ['/Create', '/TN', name, '/TR', '"' + action.execute + '" ' + argument, '/SC', 'ONCE',
         '/ST', two(date.getHours()) + ':' + two(date.getMinutes()),
         '/SD', two(date.getMonth() + 1) + '/' + two(date.getDate()) + '/' + date.getFullYear(),
         '/IT', '/Z', '/F'],
@@ -862,7 +862,10 @@ function workWithContinuation(work, id) {
 // wokeAt as its first act; a record past its wake with no mark for half an
 // hour never started, and one marked but silent for longer than a resume
 // can run has died. Either way it is history, and the slot is free.
-const LOST_UNSTARTED_MS = 30 * MINUTE;
+// Not 30 minutes: a task registered StartWhenAvailable runs when a sleeping
+// machine comes back, any time inside its 12-hour expiry, and reaping it
+// sooner would cancel the very catch-up run the registration promises.
+const LOST_UNSTARTED_MS = 12 * 60 * MINUTE + 30 * MINUTE;
 const LOST_RUNNING_MS = 3 * 60 * MINUTE + 10 * MINUTE;
 function reapLost(now) {
   const state = read();

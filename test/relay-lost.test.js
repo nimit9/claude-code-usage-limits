@@ -46,9 +46,12 @@ test('a wake that never reported back is reaped as lost, and only then', () =>
     fresh.armed = { id: 'dead-0000', cwd: '/w', wakeAt: now - 10 * MINUTE, task: null, continuation: false };
     relay.write(fresh);
     assert.strictEqual(relay.reapLost(now), false, 'ten minutes past its wake, it may still be starting');
-    fresh.armed.wakeAt = now - 45 * MINUTE;
+    fresh.armed.wakeAt = now - 6 * 60 * MINUTE;
     relay.write(fresh);
-    assert.strictEqual(relay.reapLost(now), true, 'never started in 45 minutes: lost');
+    assert.strictEqual(relay.reapLost(now), false, 'six hours past: a sleeping machine runs it on resume, inside the 12-hour expiry');
+    fresh.armed.wakeAt = now - 13 * 60 * MINUTE;
+    relay.write(fresh);
+    assert.strictEqual(relay.reapLost(now), true, 'never started in 13 hours: lost');
     assert.strictEqual(relay.read().armed, null);
     assert.strictEqual(relay.read().history[0].outcome, 'lost');
     assert.match(relay.read().history[0].detail, /never started/);
