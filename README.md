@@ -19,6 +19,37 @@ opens with the answer instead:
 
 Nobody read a chart to get that. The numbers reached the model, not you.
 
+## What it runs on your machine, and what it never does
+
+Installing this plugin registers six Claude Code hooks, which means Node runs on
+your machine at six moments: `UserPromptSubmit` (the budget line), `PreToolUse`
+(the fan-out line, and the refusal when a cap is set), `PostToolUse` and
+`SubagentStop` (keeping the reading fresh), and `Stop` and `SessionEnd` (the
+session tally). Nothing runs on a timer except a relay wake you armed yourself.
+
+What it reads: your Claude Code transcripts under the config directory, to price
+what has been spent; the account snapshot the host already fetched; and your
+settings files. What it writes: its own files beside those, every one prefixed
+`usage-limits-`, plus the launcher and scheduled task a relay needs while one
+is armed.
+
+**It does read your login.** The live reading is the same call Claude Code
+makes for `/usage`, and making it needs the same OAuth token, so this plugin
+reads it from `.credentials.json` (or, on macOS, the `Claude Code-credentials`
+keychain item) and sends it as a bearer token to
+`https://api.anthropic.com/api/oauth/usage`. That token is never written to a
+file, never logged, and never sent anywhere else: the destination is checked
+against an allowlist first - Anthropic over https, or loopback for the tests -
+because a project settings file can put anything in a hook's environment and
+the override that points at a different endpoint must not become a way to walk
+off with your login. Without a live reading the plugin still works, from the
+snapshot and your transcripts.
+
+Apart from that one call to Anthropic, nothing leaves the machine: no
+telemetry, no upload, no record of your usage kept anywhere else. Everything it
+knows sits in files you can open, and `node bin/cli.js mode off` stops it
+injecting anything at all.
+
 ## Do not want any of this?
 
     node bin/cli.js mode off              nothing injected, ever - including at the wall
