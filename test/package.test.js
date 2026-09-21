@@ -178,3 +178,14 @@ test('the package version and the plugin manifest version agree', () => {
       'marketplace pins an older version than npm serves'
   );
 });
+
+// A plugin.json at the repo root, two versions stale, was the first thing a
+// scraper or a reader would find and trust. Nothing read it: Claude Code reads
+// .claude-plugin/, Codex reads .codex-plugin/, and the Antigravity installer
+// writes its own manifest and hooks from code. Deleted in 1.37.0; this keeps
+// it deleted.
+test('the stale root-level manifest pair stays gone', () => {
+  for (const file of ['plugin.json', 'hooks.json']) {
+    assert.ok(!fs.existsSync(path.join(root, file)), file + ' at the repo root is read by nothing and drifts from the real manifests');
+  }
+});

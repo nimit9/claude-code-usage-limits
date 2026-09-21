@@ -55,7 +55,7 @@ test('the before-prompt line refreshes an aged reading the way /usage would', as
   delete process.env.USAGE_LIMITS_FETCH;
   try {
     const text = await brief.run(now, { session_id: 'refresh-1', prompt: 'hello', cwd: dir });
-    assert.match(text, /5-hour (about )?60% used/, text);
+    assert.match(text, /5-hour (about )?60% \(the live reading; Claude Code's cache says 10%\) used/, text);
     assert.strictEqual(server.hits, 1);
     assert.strictEqual(live.readLive().utilization.five_hour.utilization, 60);
 

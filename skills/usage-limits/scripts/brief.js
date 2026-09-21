@@ -120,27 +120,99 @@ function saidFile() {
 function shapeOf(text) {
   return String(text || '').replace(/\d+/g, '#');
 }
+// The said file holds three kinds of memo, told apart by key: the plain
+// session key is the ninety-second shape, and the two suffixed keys below
+// are per-session facts that have to outlive an hour's silence.
+function readSaid() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(saidFile(), 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (err) {
+    return {};
+  }
+}
+function keepSaidFor(key) {
+  return /#(standing|cachemiss)$/.test(key) ? 24 * 60 * 60 * 1000 : 60 * 60 * 1000;
+}
+function writeSaid(all, at) {
+  const next = {};
+  for (const [k, v] of Object.entries(all)) if (v && Number.isFinite(v.at) && at - v.at < keepSaidFor(k)) next[k] = v;
+  try {
+    usage.writeJsonAtomic(saidFile(), next);
+  } catch (err) {
+  }
+}
 function sayOnce(sessionId, text, now) {
   if (!text || process.env.USAGE_LIMITS_BRIEF_REPEAT === '1') return text;
   const at = Number.isFinite(now) ? now : Date.now();
   const key = String(sessionId || '_');
   const shape = shapeOf(text);
-  let all = {};
-  try {
-    all = JSON.parse(fs.readFileSync(saidFile(), 'utf8')) || {};
-  } catch (err) {
-    all = {};
-  }
+  const all = readSaid();
   const last = all[key];
   if (last && Number.isFinite(last.at) && at - last.at < REPEAT_MS && last.shape === shape) return '';
-  const next = {};
-  for (const [k, v] of Object.entries(all)) if (v && Number.isFinite(v.at) && at - v.at < 60 * 60 * 1000) next[k] = v;
-  next[key] = { at, shape };
-  try {
-    usage.writeJsonAtomic(saidFile(), next);
-  } catch (err) {
-  }
+  all[key] = { at, shape };
+  writeSaid(all, at);
   return text;
+}
+
+// The standing instruction - open with the fit line, quote the binding
+// window, close finished work with the total - reads the same on every prompt,
+// and at 93 words it was the largest fixed cost in the line. It is said in
+// full once per session and as twelve words after that. A session that has
+// heard it has heard it; USAGE_LIMITS_BRIEF_FULL=1 says the full form every
+// time for anyone who wants that.
+const STANDING_SHORT = 'Open with the fit line; close finished work with the session total.';
+function standingSaid(sessionId, now) {
+  const entry = readSaid()[String(sessionId || '_') + '#standing'];
+  return Boolean(entry && Number.isFinite(entry.at) && (Number.isFinite(now) ? now : Date.now()) - entry.at < keepSaidFor('#standing'));
+}
+function markStanding(sessionId, now) {
+  const at = Number.isFinite(now) ? now : Date.now();
+  const all = readSaid();
+  all[String(sessionId || '_') + '#standing'] = { at };
+  writeSaid(all, at);
+}
+function standingShortFor(sessionId, now, env) {
+  if ((env || process.env).USAGE_LIMITS_BRIEF_FULL === '1') return false;
+  return standingSaid(sessionId, now);
+}
+
+// The prompt right after a cache miss the user can do something about.
+//
+// The status line JSON carries prompt_cache.last_miss_at (epoch seconds) and
+// last_miss_cause.causes (Claude Code 2.1.260 and later; documented values
+// tools_changed, system_prompt_changed, ttl_expired_5m, likely_server_side),
+// and feed.js keeps the last one in this session's feed slot. Only the two
+// causes a person can act on are named: a TTL expiry is time passing and a
+// server-side miss is nobody's. It is said on the first brief after the miss
+// and not again for that miss, and never for a miss older than half an hour,
+// because "right after" is the whole point.
+const MISS_RECENT_MS = 30 * 60 * 1000;
+function missReason(causes) {
+  const set = new Set(Array.isArray(causes) ? causes : []);
+  if (set.has('system_prompt_changed')) return 'the system prompt changed';
+  if (set.has('tools_changed')) return 'the tool list changed';
+  return null;
+}
+function cacheMissWhyFor(sessionId, now) {
+  if (!sessionId) return null;
+  const at = Number.isFinite(now) ? now : Date.now();
+  let miss = null;
+  try {
+    const slot = feed.readFeed()[sessionId];
+    miss = slot && slot.cacheMiss;
+  } catch (err) {
+    return null;
+  }
+  if (!miss || !Number.isFinite(miss.at) || at - miss.at > MISS_RECENT_MS) return null;
+  const why = missReason(miss.causes);
+  if (!why) return null;
+  const all = readSaid();
+  const key = String(sessionId) + '#cachemiss';
+  if (all[key] && all[key].at === miss.at) return null;
+  all[key] = { at: miss.at };
+  writeSaid(all, at);
+  return why;
 }
 // One slot per session. A single shared slot meant that alternating between
 // two Claude Code windows invalidated the cache on every prompt, so neither
@@ -345,6 +417,8 @@ const CACHED_BINDING_FIELDS = [
   'pointsSinceSnapshot',
   'correctionUnreliable',
   'pointsBeyondSnapshot',
+  // Both account readings, when there are two, so the line can name them.
+  'sources',
   'resetsAt',
   'verdict',
   'windowStart',
@@ -454,7 +528,20 @@ function describeWindow(window) {
   // in hand, and the reply that follows sizes the work down for a limit not one
   // turn here can move.
   const idle = window.applies === false ? " (not this session's model)" : '';
-  return window.label + about + window.percentUsed + '%' + idle;
+  // Two account readings that disagree are named, not averaged and not
+  // silently picked between. On 2026-09-20 one window read 14, 30 and 20 per
+  // cent within three minutes as Claude Code's cache and the plugin's own
+  // live reading took turns being the newer; a reader who sees one number
+  // cannot tell that from the budget moving. Five points is the line: under
+  // that the two are the same reading at different moments.
+  const s = window.sources;
+  const split =
+    s && Number.isFinite(s.cache) && Number.isFinite(s.live) && Math.abs(s.cache - s.live) > 5
+      ? s.used === 'live'
+        ? " (the live reading; Claude Code's cache says " + s.cache + '%)'
+        : " (Claude Code's cache; the live reading says " + s.live + '%)'
+      : '';
+  return window.label + about + window.percentUsed + '%' + split + idle;
 }
 
 // Everything except the window that will actually stop the work.
@@ -526,6 +613,9 @@ function briefText(input) {
   const bounds = (input.mode && input.mode.bounds) || null;
   const pinned = Boolean(bounds && bounds.pin);
   const parts = applyBounds(input, bounds);
+  // The short standing form only where the three standing strings would
+  // otherwise appear: the tight and gone instructions are their own words.
+  const shortStanding = parts.standingShort === true && parts.pressure !== 'tight' && parts.pressure !== 'gone';
 
   // The turns and the reset time belong to one specific window. Listing every
   // window and then the numbers invites reading them against the wrong one, so
@@ -574,10 +664,16 @@ function briefText(input) {
   const fast = parts.fastMode
     ? '; fast mode on, billed from usage credits rather than this window, and its first turn re-reads the whole context uncached'
     : '';
+  // One clause, on the prompt right after a cache miss the user caused, and
+  // nothing otherwise. The cause comes from the status line's prompt_cache
+  // object through feed.js; see cacheMissWhyFor.
+  const missed = parts.cacheMissWhy
+    ? '; the prompt cache missed on the last call because ' + parts.cacheMissWhy + ', so that call re-read the whole context'
+    : '';
   sentences.push(
     bound.length
-      ? '[usage-limits] ' + token + 'binding window is ' + bound.join(', ') + fast + '.'
-      : '[usage-limits] ' + token + 'no usable window reading' + fast + '.'
+      ? '[usage-limits] ' + token + 'binding window is ' + bound.join(', ') + fast + missed + '.'
+      : '[usage-limits] ' + token + 'no usable window reading' + fast + missed + '.'
   );
   // What tier is producing this turn.
   //
@@ -985,20 +1081,23 @@ function briefText(input) {
           'which files are mid-change. Say in one line what may not land before ' +
           'the reset, then keep working; for a mechanical remainder, node ' +
           'scripts/usage.js --recommend (skill directory) names the effort and model.'
-        : 'Open with one short line stating this and that the request fits, then ' +
-          'get on with the work. There is room: full quality, the whole request, nothing held ' +
-          'back, since unspent budget is lost at the reset.';
+        : shortStanding
+          ? STANDING_SHORT
+          : 'Open with one short line stating this and that the request fits, then ' +
+            'get on with the work. There is room: full quality, the whole request, nothing held ' +
+            'back, since unspent budget is lost at the reset.';
 
   // The mistake this guards against: quoting the roomiest window and pinning
   // the binding window figures to it.
-  const care =
-    ' Quote the binding window; its turns and reset time belong to it alone.';
+  const care = shortStanding
+    ? ''
+    : ' Quote the binding window; its turns and reset time belong to it alone.';
 
   // Finished work closes with what it cost. Not every reply: a progress note
   // mid-task is not the moment, and once the budget is gone nothing further
   // runs, so there is no reply to close.
   const closing =
-    parts.pressure === 'gone'
+    parts.pressure === 'gone' || shortStanding
       ? ''
       : ' When this reply completes what was asked, or wraps up the session, end it ' +
         'with one plain line giving the session total above (turns, tokens and cost). ' +
@@ -1470,9 +1569,14 @@ async function run(now, hookInput) {
     writeCache(mergeCache(slots, sessionId, Object.assign({}, slot || { at: now }, { said: digest }), KEEP_SESSIONS));
   }
 
-  return briefText({
+  // The standing text in full the first time, twelve words after. Decided
+  // here, and marked below only when the full form actually went out.
+  const standingShort = standingShortFor(sessionId, now);
+  const text = briefText({
     mode: budget,
     tier,
+    standingShort,
+    cacheMissWhy: cacheMissWhyFor(sessionId, now),
     adviceText: terse && offering ? advice.text : null,
     relay: carry,
     voiceNote,
@@ -1527,6 +1631,10 @@ async function run(now, hookInput) {
     // a third of it.
     pressure: pressureNow,
   });
+  // Only the roomy form carries the three standing strings; the terse style
+  // drops them and the tight and gone instructions are their own words.
+  if (text && !standingShort && !terse && pressureNow !== 'tight' && pressureNow !== 'gone') markStanding(sessionId, now);
+  return text;
 }
 
 if (require.main === module) {
@@ -1572,6 +1680,7 @@ function withBugcheck(text) {
 }
 
 module.exports = { withBugcheck, sayOnce, shapeOf, saidFile, REPEAT_MS,
+  readSaid, standingSaid, markStanding, standingShortFor, STANDING_SHORT, cacheMissWhyFor, missReason, MISS_RECENT_MS,
   DEFAULTS,
   aheadOfPace,
   pacingMatters,

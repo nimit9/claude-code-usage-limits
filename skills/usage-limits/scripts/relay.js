@@ -778,6 +778,84 @@ function remainingMs(deadline, ceiling) {
   return Math.max(0, Math.min(ceiling, left));
 }
 
+// What the PowerShell route may take when nothing bounds it. It used to be a
+// fixed eight seconds whether or not a hook was waiting, and on this machine
+// the ScheduledTasks module alone takes longer than that: measured
+// 2026-09-21, 32 seconds to load and register, 16 to unregister. So every arm
+// by hand timed out here (ETIMEDOUT, which has no stderr), fell through to
+// schtasks, and reported only the fallback's refusal - twice on the night of
+// 2026-09-20, with the primary route's failure never seen at all.
+const PS_ROUTE_MS = 60000;
+const SCHTASKS_MS = 8000;
+
+// One spawn's failure in a phrase that fits beside another's. A timeout has
+// no stderr, so reading only stderr is how the primary route's failure was
+// lost.
+function describeSpawn(label, run, timeoutMs) {
+  if (!run) return label + ': not attempted';
+  if (run.error) {
+    return label + ': ' + (run.error.code === 'ETIMEDOUT'
+      ? 'timed out after ' + Math.round(timeoutMs / 1000) + ' s'
+      : run.error.message);
+  }
+  const said = String(run.stderr || run.stdout || '').trim().split('\n')[0];
+  if (said) return label + ': ' + said;
+  return label + ': exited ' + run.status + ' with no output';
+}
+
+/* ------------------------------------------------------ the task launcher -- */
+
+// The task's own launcher: one small batch file per record, under the config
+// directory, holding the whole node command. Both registration routes point
+// at it, so the task action has one fixed shape whose length no longer
+// depends on where the plugin is installed. It has to be: schtasks caps /TR
+// at 261 characters, and the action used to carry node's path, the plugin
+// cache path to wake.js, the session id and the config directory - 326
+// characters on the 1.36.0 install - so the fallback was refused every time
+// it was tried. cmd's quoting rules apply to text this code wrote: a doubled
+// percent sign is the one escape needed inside double quotes, and a double
+// quote has no escape there, so it is dropped (no path can hold one).
+function wakeLauncherFile(id) {
+  return path.join(configDir(), 'relay-task-' + String(id).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 8) + '.cmd');
+}
+
+function batchArg(text) {
+  return '"' + String(text).replace(/%/g, '%%').replace(/"/g, '') + '"';
+}
+
+function wakeLauncherScript(argv) {
+  return '@echo off\r\n' + [process.execPath].concat(argv).map(batchArg).join(' ') + '\r\n';
+}
+
+function writeWakeLauncher(id, argv) {
+  const file = wakeLauncherFile(id);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, wakeLauncherScript(argv), 'utf8');
+  return file;
+}
+
+// Deleting a batch file while cmd is still on its last line makes cmd end
+// with "The batch file cannot be found" (tested 2026-09-21), so a wake never
+// deletes its own launcher. They are swept here instead, from a process that
+// is not running under one: every relay-task-*.cmd whose record is gone.
+function sweepWakeLaunchers(state) {
+  const keep = new Set(records(state).map((r) => path.basename(wakeLauncherFile(r.id))));
+  let names;
+  try {
+    names = fs.readdirSync(configDir());
+  } catch (err) {
+    return;
+  }
+  for (const name of names) {
+    if (!/^relay-task-[A-Za-z0-9_-]{0,8}\.cmd$/.test(name) || keep.has(name)) continue;
+    try {
+      fs.unlinkSync(path.join(configDir(), name));
+    } catch (err) {
+      // A launcher that will not delete is a stray file, not a failed relay.
+    }
+  }
+}
+
 // Does Windows agree that this task will run?
 //
 // `state` and `next` come straight from Get-ScheduledTask and
@@ -835,23 +913,38 @@ const HIDDEN_HOST = path.join(process.env.SystemRoot || 'C:' + path.sep + 'Windo
 // result 0xC000013A), so the wake never wrote its outcome. PowerShell can
 // start hidden and node inherits that; the session the wake opens for the
 // user is a new window (cmd /c start) and stays visible.
-function hiddenAction(argv, cwd) {
-  const command = '& ' + [process.execPath].concat(argv).map(psQuote).join(' ');
+function hiddenAction(launcher, cwd) {
   return {
     execute: HIDDEN_HOST,
-    argument: '-NoProfile -NonInteractive -WindowStyle Hidden -Command "' + command + '"',
+    argument: '-NoProfile -NonInteractive -WindowStyle Hidden -Command "& ' + psQuote(launcher) + '"',
     cwd: cwd || os.homedir(),
   };
 }
 
+// The one string schtasks measures: the /TR value.
+function taskAction(action) {
+  return '"' + action.execute + '" ' + action.argument;
+}
+
 function scheduleWindows(when, argv, name, cwd, deadline) {
+  // No time left is a plain refusal, not a hung hook - and not a launcher
+  // written for a task that is never registered.
+  if (Number.isFinite(deadline) && remainingMs(deadline, PS_ROUTE_MS) < 1500) {
+    return { ok: false, error: 'no time left in this hook to register the wake; it will arm on the next prompt' };
+  }
   let lastVerifyError = null;
   const date = new Date(when);
   const stamp =
     date.getFullYear() + '-' + two(date.getMonth() + 1) + '-' + two(date.getDate()) + ' ' +
     two(date.getHours()) + ':' + two(date.getMinutes()) + ':' + two(date.getSeconds());
-  const action = hiddenAction(argv, cwd);
-  const argument = action.argument;
+  const idAt = argv.indexOf('--id');
+  let launcher;
+  try {
+    launcher = writeWakeLauncher(idAt !== -1 && argv[idAt + 1] ? argv[idAt + 1] : name, argv);
+  } catch (err) {
+    return { ok: false, error: 'could not write the wake launcher: ' + err.message };
+  }
+  const action = hiddenAction(launcher, cwd);
   const script = [
     '$ErrorActionPreference = "Stop"',
     '$action = New-ScheduledTaskAction -Execute ' + psQuote(action.execute) +
@@ -892,10 +985,11 @@ function scheduleWindows(when, argv, name, cwd, deadline) {
   const file = path.join(os.tmpdir(), name + '.ps1');
   try {
     fs.writeFileSync(file, script, 'utf8');
+    const primaryMs = Math.max(500, remainingMs(deadline, PS_ROUTE_MS));
     const run = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file], {
       encoding: 'utf8',
       windowsHide: true,
-      timeout: Math.max(500, remainingMs(deadline, 8000)),
+      timeout: primaryMs,
     });
     const registered = (run.stdout || '').match(/registered\|([^|\r\n]*)\|([^\r\n]*)/);
     if (run.status === 0 && registered) {
@@ -905,19 +999,27 @@ function scheduleWindows(when, argv, name, cwd, deadline) {
       // reporting a wake that is not going to happen.
       lastVerifyError = verdict.error;
     }
+    // Kept from here on, whatever the fallback does: the fallback's outcome
+    // is the second half of the answer, never the whole of it.
+    const primaryError = lastVerifyError ? 'ScheduledTasks: ' + lastVerifyError : describeSpawn('ScheduledTasks', run, primaryMs);
     // No time left for a second attempt is a plain refusal, not a hung hook.
-    if (remainingMs(deadline, 8000) < 1500) return { ok: false, error: 'no time left in this hook to register the wake; it will arm on the next prompt' };
+    if (remainingMs(deadline, SCHTASKS_MS) < 1500) {
+      return { ok: false, error: 'no time left in this hook to register the wake (' + primaryError + '); it will arm on the next prompt' };
+    }
     // schtasks cannot express StartWhenAvailable, so this path is a worse
     // guarantee and says so rather than pretending the two are the same.
+    const fallbackMs = Math.max(500, remainingMs(deadline, SCHTASKS_MS));
     const fallback = spawnSync(
       'schtasks.exe',
-      ['/Create', '/TN', name, '/TR', '"' + action.execute + '" ' + argument, '/SC', 'ONCE',
+      ['/Create', '/TN', name, '/TR', taskAction(action), '/SC', 'ONCE',
         '/ST', two(date.getHours()) + ':' + two(date.getMinutes()),
         '/SD', two(date.getMonth() + 1) + '/' + two(date.getDate()) + '/' + date.getFullYear(),
         '/IT', '/Z', '/F'],
-      { encoding: 'utf8', windowsHide: true, timeout: Math.max(500, remainingMs(deadline, 8000)) }
+      { encoding: 'utf8', windowsHide: true, timeout: fallbackMs }
     );
-    if (fallback.status === 0) return { ok: true, how: 'schtasks', warning: 'a sleeping machine will miss this wake' };
+    if (fallback.status === 0) {
+      return { ok: true, how: 'schtasks', warning: 'a sleeping machine will miss this wake (' + primaryError + ')', primaryError };
+    }
     // Both paths failed. If the PowerShell one registered something that
     // will not fire - or will fire at the wrong time - leaving it behind is
     // an orphan that nothing tracks and nothing cancels.
@@ -928,7 +1030,7 @@ function scheduleWindows(when, argv, name, cwd, deadline) {
         // Nothing further to do; the expiry is the backstop.
       }
     }
-    return { ok: false, error: (lastVerifyError || run.stderr || fallback.stderr || 'could not register a scheduled task').trim().split('\n')[0] };
+    return { ok: false, error: primaryError + '; ' + describeSpawn('schtasks', fallback, fallbackMs), primaryError };
   } catch (err) {
     return { ok: false, error: err.message };
   } finally {
@@ -1040,7 +1142,10 @@ function reapLost(now) {
     }
     reaped = true;
   }
-  if (reaped) write(state);
+  if (reaped) {
+    write(state);
+    sweepWakeLaunchers(state);
+  }
   return reaped;
 }
 
@@ -1143,6 +1248,9 @@ function arm(input) {
     // The old wake is deliberately left alone here. A stale wake that still
     // fires is worth more than none, and it carries the same continuation.
     note('arm failed for ' + id + ': ' + scheduled.error + (previousTask ? '; the previous wake was left in place' : ''), now);
+    // A launcher written for a session that has no record is a stray; one
+    // that an earlier wake of this session still points at is kept with it.
+    sweepWakeLaunchers(state);
     return { ok: false, error: scheduled.error };
   }
 
@@ -1184,7 +1292,13 @@ function arm(input) {
   const beside = records(state).filter((r) => r.id !== id).map((r) => r.id.slice(0, 8));
   putRecord(state, record);
   write(state);
-  note('armed ' + id + ' for ' + new Date(when).toISOString() + ' via ' + scheduled.how + (beside.length ? ' beside ' + beside.join(', ') : ''), now);
+  sweepWakeLaunchers(state);
+  note(
+    'armed ' + id + ' for ' + new Date(when).toISOString() + ' via ' + scheduled.how +
+      (scheduled.primaryError ? ' (' + scheduled.primaryError + ')' : '') +
+      (beside.length ? ' beside ' + beside.join(', ') : ''),
+    now
+  );
   return { ok: true, record };
 }
 
@@ -1222,6 +1336,7 @@ function disarm(reason, now, id) {
   }
   state.history = state.history.slice(-10);
   write(state);
+  sweepWakeLaunchers(state);
   return { ok: true, changed: true, record: targets[0], records: targets };
 }
 
@@ -1381,6 +1496,36 @@ async function doctor(now) {
   const cli = caps.claude || caps.codex;
   add('a CLI to resume with', Boolean(cli), cli || 'neither the claude nor the codex CLI could be found on PATH');
 
+  // Whether there is a login for the wake to resume under, asked of the CLI
+  // itself: `claude auth status --json` reports loggedIn and nothing secret.
+  // WHEN it expires is the one thing this cannot check. That command reports
+  // no expiry (2.1.263, read from its output), and the only expiry on disk
+  // is inside .credentials.json, which the relay does not read for credential
+  // values. So it is stated as a limit rather than guessed at: a login that
+  // lapses before the wake stops the resumed run at a prompt nobody answers.
+  if (caps.claude) {
+    const auth = spawnSync(caps.claude, ['auth', 'status', '--json'], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 20000,
+      shell: process.platform === 'win32' && /\.(cmd|bat)$/i.test(caps.claude),
+    });
+    let parsed = null;
+    try {
+      parsed = JSON.parse(String(auth.stdout || '').trim());
+    } catch (err) {
+      parsed = null;
+    }
+    if (parsed && typeof parsed.loggedIn === 'boolean') {
+      add('login', parsed.loggedIn, parsed.loggedIn
+        ? 'logged in' + (parsed.subscriptionType ? ' (' + parsed.subscriptionType + ')' : '') +
+          '. Its expiry is not checked: claude auth status does not report one and the relay does not read .credentials.json, so run /login before a relay that fires hours from now'
+        : 'not logged in - the resumed run would stop at the login prompt. Run: claude auth login');
+    } else {
+      add('login', true, 'claude auth status gave no answer; expiry is not checked either way, so run /login before a long relay', 'warning');
+    }
+  }
+
   const net = await require('./net.js').reachable({ timeoutMs: 8000 });
   add('network to the API', net.online, net.detail,
     net.online ? 'ok' : net.reason === 'intercepted' ? 'error' : 'warning');
@@ -1407,13 +1552,18 @@ async function doctor(now) {
         quiet ? 'ok' : 'warn');
     }
     const probeName = 'usage-limits-doctor-probe';
-    const registered = scheduleWindows(at + 6 * 60 * MINUTE, [path.join(__dirname, 'wake.js'), '--id', 'doctor-probe'], probeName, os.homedir(), at + 20000);
+    // Ninety seconds, not twenty: the PowerShell route takes over thirty on
+    // this machine, and a probe cut off before it can finish reports the
+    // fallback, which is a different answer to the question being asked.
+    const registered = scheduleWindows(at + 6 * 60 * MINUTE, [path.join(__dirname, 'wake.js'), '--id', 'doctor-probe'], probeName, os.homedir(), at + 90000);
     add('scheduled tasks', registered.ok, registered.ok
       ? 'registered a test task via ' + registered.how + (registered.how === 'schtasks'
-        ? ' - the PowerShell path failed, so a sleeping machine will miss its wake'
+        ? ' - the PowerShell path failed (' + registered.primaryError + '), so a sleeping machine will miss its wake'
         : ' - StartWhenAvailable and WakeToRun are set, so a machine that was off or asleep still runs it')
       : registered.error, registered.ok && registered.how === 'schtasks' ? 'warning' : undefined);
     if (registered.ok) cancelSchedule(probeName);
+    // The probe's launcher has no record, so the sweep takes it.
+    sweepWakeLaunchers(state);
 
     // A wake at 3am is no use if the machine hibernates at midnight and the
     // task is not allowed to wake it. This reads the actual power policy.
@@ -1671,6 +1821,7 @@ if (require.main === module) {
 }
 
 module.exports = { workWithContinuation, reapLost, hiddenAction, BUGCHECK_LINE,
+  taskAction, wakeLauncherFile, wakeLauncherScript, writeWakeLauncher, sweepWakeLaunchers, batchArg, describeSpawn, PS_ROUTE_MS, SCHTASKS_MS,
   records, armedFor, putRecord, dropRecord, preflightPrompts, claudeJsonFile, projectKeys, isHome, launchDirFor, applySetting, settingIs,
   DEFAULTS,
   MINUTE,

@@ -124,7 +124,26 @@ function slotFrom(input, previous, now) {
     cwd: typeof input.cwd === 'string' ? input.cwd : prior.cwd || null,
     version: typeof input.version === 'string' ? input.version : prior.version || null,
     fastMode: input.fast_mode === true,
+    cacheMiss: missFrom(input.prompt_cache, prior.cacheMiss),
   };
+}
+
+// The last prompt-cache miss and its diagnosed causes, from the status line's
+// prompt_cache object: last_miss_at is epoch seconds and last_miss_cause is
+// null until the first miss and whenever no cause was found (Claude Code
+// 2.1.260 and later; both per code.claude.com/docs/en/statusline). The moment
+// is what lets the brief tell a new miss from the same one arriving on every
+// refresh. A refresh without the object, or without a diagnosed cause, keeps
+// what the last one said.
+function missFrom(cache, prior) {
+  if (!cache || typeof cache !== 'object') return prior || null;
+  const at = typeof cache.last_miss_at === 'number' && Number.isFinite(cache.last_miss_at) ? cache.last_miss_at * 1000 : null;
+  const cause = cache.last_miss_cause;
+  const causes = cause && typeof cause === 'object' && Array.isArray(cause.causes)
+    ? cause.causes.filter((name) => typeof name === 'string')
+    : [];
+  if (at === null || !causes.length) return prior || null;
+  return { at, causes };
 }
 
 function trim(all, keep) {
@@ -559,6 +578,7 @@ module.exports = {
   CHAIN_TIMEOUT_MS,
   feedFile,
   readFeed,
+  missFrom,
   writeFeed,
   slotFrom,
   record,

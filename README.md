@@ -357,6 +357,35 @@ displaced the first. Each session now has its own record and its own scheduled
 task; status lists them all, relay cancel takes down this session's, and
 relay cancel --all takes down every one.
 
+**1.37.0 fixed the arm that failed twice on 2026-09-20.** `relay arm` reported
+`Value for '/TR' option cannot be more than 261 character(s)` - schtasks refusing
+the task action, which carried node's path, the plugin cache path, the session
+id and the config directory: 326 characters. That was only the fallback. The
+primary ScheduledTasks route had already been killed at a fixed eight-second
+ceiling while PowerShell was still loading the module (32 seconds on that
+machine), and a timeout has no stderr, so nothing reported it. The task now
+runs a small launcher in the config directory (`relay-task-<id>.cmd`) so the
+action has one fixed length whatever the plugin path; the PowerShell route
+gets a minute from the command line and the hook's own deadline from a hook;
+and a failure names both routes side by side. `relay doctor` also reports
+whether a login is there to resume under. When that login expires is not
+checked: `claude auth status` does not report it and the relay does not read
+`.credentials.json`, so renew `/login` before a relay that fires hours later.
+
+Smaller changes in the same release: the budget line names both account
+readings when Claude Code's cache and the plugin's live reading differ by more
+than five points (`5-hour 20% (the live reading; Claude Code's cache says
+14%)`) rather than showing one number that jumps; its standing instruction is
+said in full once per session and as twelve words after that
+(`USAGE_LIMITS_BRIEF_FULL=1` keeps the full form); one clause is added on the
+prompt right after a prompt-cache miss the user caused - a changed tool list
+or system prompt, read from the status line's `prompt_cache` - and nothing
+otherwise; the mid-turn pulse's tight sentence is throttled to the same ten
+minutes as its fan-out advice; a subagent message written as several content
+blocks is priced by its last block, which carries the real output count
+(measured on 179 agent transcripts: 1,991 of 2,504 such messages ran like
+1, 1, 202); and the headless resume runs with `DISABLE_AUTOUPDATER=1`.
+
 | | |
 | --- | --- |
 | **Off by default** | Scheduling an agent to run while nobody is watching is a decision you make on purpose, not one a plugin makes for you. |
@@ -600,6 +629,7 @@ minute, so it costs about 400ms cold and 120ms warm.
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `USAGE_LIMITS_BRIEF` | on | Set to `off` to turn the before-prompt line off entirely. |
+| `USAGE_LIMITS_BRIEF_FULL` | off | Set to `1` to say the line's standing instruction in full on every prompt. By default it is said in full once per session and as twelve words after that. |
 | `USAGE_LIMITS_NEAR` | 90 | Percent used at which the budget counts as tight. Nothing below it is discouraged. |
 | `USAGE_LIMITS_FEW_TURNS` | 10 | Turns of headroom at or below which the budget counts as tight. |
 | `USAGE_LIMITS_RUNWAY` | 10 | Minutes of runway at the current pace below which the budget counts as tight. |

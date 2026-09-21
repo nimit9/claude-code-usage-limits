@@ -1124,18 +1124,32 @@ async function readClaudeEvents(since, options) {
     if (changed) writeScanCache(cache);
   }
 
-  const seen = new Set();
+  // One event per message id, and it is the LAST line that carries it.
+  //
+  // A message that streams several content blocks is written as several
+  // lines sharing one message id, each with a usage block, and in subagent
+  // transcripts only the last has the final output count: measured on
+  // 2026-09-21 across 179 agent files, 1,991 of 2,504 such groups ran like
+  // [1, 1, 202], so keeping the first block priced a 202-token answer at one
+  // token. Main transcripts repeat the same figure on every line (1,811
+  // groups, all identical), so for them this is the same answer either way.
+  const seen = new Map();
   const events = [];
   for (const held of collected) {
     for (const row of held.rows) {
       if (row[1] < since) continue;
       const id = row[0] === ROW_TURN ? row[13] : '';
-      if (id) {
-        if (seen.has(id)) continue;
-        seen.add(id);
-      }
       const event = unpackEvent(row, held.project);
-      if (event) events.push(event);
+      if (!event) continue;
+      if (id) {
+        const index = seen.get(id);
+        if (index !== undefined) {
+          events[index] = event;
+          continue;
+        }
+        seen.set(id, events.length);
+      }
+      events.push(event);
     }
   }
 
@@ -2827,6 +2841,23 @@ function accountUuid() {
     : null;
 }
 
+// Per window key, the percentage each account source reports and which one
+// the report is using: { five_hour: { cache: 14, live: 20, used: 'live' } }.
+// Null unless both sources have the window.
+function sourcePercents(cache, fresh, used) {
+  if (!cache || !cache.utilization || typeof cache.utilization !== 'object') return null;
+  if (!fresh || !fresh.utilization || typeof fresh.utilization !== 'object') return null;
+  const out = {};
+  for (const key of Object.keys(cache.utilization)) {
+    const a = cache.utilization[key];
+    const b = fresh.utilization[key];
+    if (a && b && typeof a.utilization === 'number' && typeof b.utilization === 'number') {
+      out[key] = { cache: a.utilization, live: b.utilization, used };
+    }
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 function collectClaude(now) {
   const account = readJson(accountFile()) || {};
   const settings = readJson(path.join(configDir(), 'settings.json')) || {};
@@ -2840,6 +2871,12 @@ function collectClaude(now) {
   const snapshot = useLive ? fresh : cache;
   const utilization = snapshot && snapshot.utilization ? snapshot.utilization : null;
   const plan = detectPlan(oauth);
+  // The reading that was not chosen, kept beside the one that was, so a
+  // window can be described by both when they disagree. A live file for
+  // another account or from a clock that is ahead is not a second reading of
+  // this account and is left out, by the same rule that keeps it from being
+  // preferred.
+  const comparable = fresh && preferLive(null, fresh, oauth.accountUuid, now) ? fresh : null;
 
   return {
     now,
@@ -2853,6 +2890,7 @@ function collectClaude(now) {
     snapshotAgeMs: snapshot && snapshot.fetchedAtMs ? now - snapshot.fetchedAtMs : null,
     snapshotFetchedAt: snapshot && snapshot.fetchedAtMs ? snapshot.fetchedAtMs : null,
     snapshotSource: utilization ? (useLive ? 'live' : 'cache') : null,
+    sources: sourcePercents(cache, comparable, useLive ? 'live' : 'cache'),
     utilization,
     settings: {
       model: settings.model || 'default',
@@ -3191,6 +3229,11 @@ async function report(now, options) {
     // exists.
     calibrated.planChanged ? new Map() : rejections
   );
+  // Both account readings ride on the window, so whatever describes it can
+  // name them when they disagree.
+  if (base.sources) {
+    for (const window of windows) if (base.sources[window.key]) window.sources = base.sources[window.key];
+  }
 
   // Which of those windows this agent can actually spend into. Everything that
   // ranks or warns about a window reads the answer off the window itself.

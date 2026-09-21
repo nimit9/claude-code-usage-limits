@@ -152,6 +152,10 @@ function pulseText(parts) {
       '. Fewer agents with a fresh context beat another turn of a long one.'
     );
   }
+  // The tight and gone sentences are advice too, and they were said on every
+  // due pulse - three times in ten minutes on 2026-09-20. Same slot and same
+  // ten minutes as the fan-out advice; the reading itself is never withheld.
+  if ((parts.pressure === 'gone' || parts.pressure === 'tight') && parts.advice === false) return head;
   if (parts.pressure === 'gone') {
     return head + ' The budget is gone. Stop adding work, save what exists and write the handoff.';
   }
@@ -405,6 +409,11 @@ async function run(now, hookInput) {
     return recheck;
   }
 
+  // The pressure advice shares the fan-out advice's slot and its ten minutes.
+  // Unlike the fan-out's, it is stamped after the fact and only when a line
+  // actually carried it: a pulse with no reading to hang it on says nothing,
+  // and must not spend the slot on nothing.
+  const sayPressureAdvice = !fanout && (pressure === 'tight' || pressure === 'gone') && due(readState(), adviceKey, now, 10 * 60 * 1000);
   const spoken = pulseText({
     label: binding.label,
     percentUsed: binding.percentUsed,
@@ -417,8 +426,9 @@ async function run(now, hookInput) {
     sessions: active,
     pressure,
     fanout,
-    advice: sayAdvice,
+    advice: fanout ? sayAdvice : sayPressureAdvice,
   });
+  if (spoken && sayPressureAdvice) writeState(trim(readState(), adviceKey, now));
   return recheck ? (spoken ? spoken + ' ' + recheck : recheck) : spoken;
 }
 

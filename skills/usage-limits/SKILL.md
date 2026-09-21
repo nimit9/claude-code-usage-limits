@@ -662,6 +662,22 @@ machine whose power plan forbids wake timers, a scheduled task this account
 cannot register, no continuation written, no network - and says which would
 bite. Every resumed run's full output is kept: `relay log --run`.
 
+An arm that fails says which route failed and why: the ScheduledTasks route
+and the schtasks fallback are named side by side, since on 2026-09-20 only the
+fallback's refusal was reported and the real failure - PowerShell timing out
+while its module loaded - was never seen. The task runs a small launcher in
+the config directory (`relay-task-<id>.cmd`), so the action fits schtasks
+whatever the plugin path. The doctor also reports whether a login is there to
+resume under; when it expires is not checked, so renew `/login` before a
+relay that fires hours later.
+
+The budget line's standing instruction - open with the fit line, quote the
+binding window, close finished work with the total - is said in full once per
+session and as twelve words after; it is the same instruction. When two
+account readings disagree by more than five points the line names both rather
+than one, and on the prompt right after a prompt-cache miss you caused it says
+so in one clause.
+
 The relay is off unless the user turned it on, and it only arms while there is
 an unfinished todo list or an approved plan to carry. Do not turn it on for
 them, and do not promise behaviour it does not have:

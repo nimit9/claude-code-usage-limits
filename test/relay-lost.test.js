@@ -65,12 +65,12 @@ test('a wake that never reported back is reaped as lost, and only then', () =>
     assert.match(relay.read().history[0].detail, /never reported back/);
   }));
 
-test('the scheduled task runs node under a hidden PowerShell, each argument quoted', () => {
-  const action = relay.hiddenAction(['C:\\p q\\wake.js', '--id', 'sess-1234', '--host', 'claude'], 'C:\\work');
+test('the scheduled task runs the launcher under a hidden PowerShell, its path quoted', () => {
+  const action = relay.hiddenAction("C:\\Users\\o'b\\.claude\\relay-task-sess1234.cmd", 'C:\\work');
   assert.match(action.execute, /powershell\.exe$/i);
   assert.ok(action.argument.startsWith('-NoProfile -NonInteractive -WindowStyle Hidden -Command "& '));
-  assert.ok(action.argument.includes("'C:\\p q\\wake.js' '--id' 'sess-1234' '--host' 'claude'\""));
-  assert.ok(action.argument.includes(relay.psQuote(process.execPath)));
+  assert.ok(action.argument.endsWith("'C:\\Users\\o''b\\.claude\\relay-task-sess1234.cmd'\""), 'the apostrophe is doubled for PowerShell');
+  assert.ok(!action.argument.includes(process.execPath), 'node and the plugin path live in the launcher, not the action');
   assert.strictEqual(action.cwd, 'C:\\work');
 });
 

@@ -196,6 +196,10 @@ function spawnOptionsFor(record, config, cli) {
     // headless one shared the wake's console once and died with it.
     windowsHide: true,
     shell: process.platform === 'win32' && /\.(cmd|bat)$/i.test(cli),
+    // The visible launcher sets this in its own script; the headless run
+    // inherited the wake's environment and could start an update at launch,
+    // with nobody there to watch it. Only when nothing has set it already.
+    env: Object.assign({}, process.env, process.env.DISABLE_AUTOUPDATER === undefined ? { DISABLE_AUTOUPDATER: '1' } : {}),
   };
 }
 
