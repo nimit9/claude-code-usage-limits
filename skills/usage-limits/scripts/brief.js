@@ -22,6 +22,7 @@ const relay = require('./relay.js');
 const reading = require('./reading.js');
 const voice = require('./voice.js');
 const mode = require('./mode.js');
+const feed = require('./feed.js');
 
 const SECOND = 1000;
 const DAY = 24 * 60 * 60 * 1000;
@@ -563,10 +564,20 @@ function briefText(input) {
   // first character; anywhere else the reader is owed the reason the line
   // looks different from the one they are used to.
   const token = parts.mode && parts.mode.name !== 'standard' ? '(' + (parts.mode.label || parts.mode.name) + ') ' : '';
+  // Fast mode changes what the figures above mean, so it is said in the same
+  // sentence. Per the Claude Code docs (code.claude.com/docs/en/fast-mode and
+  // /prompt-caching): on a subscription it is billed from usage credits and
+  // "not included in the subscription rate limits", so the window's turns are
+  // not what it spends; and the first request sent with it on "reads the
+  // entire conversation history with no cache hits", once per conversation.
+  // Only while the status line has said it is on; nothing is assumed.
+  const fast = parts.fastMode
+    ? '; fast mode on, billed from usage credits rather than this window, and its first turn re-reads the whole context uncached'
+    : '';
   sentences.push(
     bound.length
-      ? '[usage-limits] ' + token + 'binding window is ' + bound.join(', ') + '.'
-      : '[usage-limits] ' + token + 'no usable window reading.'
+      ? '[usage-limits] ' + token + 'binding window is ' + bound.join(', ') + fast + '.'
+      : '[usage-limits] ' + token + 'no usable window reading' + fast + '.'
   );
   // What tier is producing this turn.
   //
@@ -628,11 +639,14 @@ function briefText(input) {
     // A correction is a measurement of local transcripts priced by a learned
     // rate. It is a good adjustment to a recent snapshot and a bad substitute
     // for an old one, because the pricing error compounds with every point it
-    // has to bridge. So an old snapshot makes the figure a floor, whether or
-    // not it has overrun anything, and that is said rather than assumed.
+    // has to bridge. The figure here is snapshot plus correction: a point
+    // estimate that can land on either side of the account - on 2026-09-20 it
+    // ran 13 to 17 points HIGH - so it is called an estimate. "Floor" is kept
+    // for the branch above, where the correction is refused and the raw
+    // snapshot is all that is shown, which really is a lower bound.
     sentences.push(
-      'Treat that percentage as a floor rather than a reading: the account snapshot ' +
-        'behind it is ' + parts.snapshotAge + ' old, so most of the figure is measured ' +
+      'Treat that percentage as an estimate rather than a reading, high or low: the account ' +
+        'snapshot behind it is ' + parts.snapshotAge + ' old, so most of the figure is measured ' +
         'from local history at a learned price rather than read from the account, and ' +
         'that gap widens the longer the snapshot stands. Run /usage to refresh it before ' +
         'making a decision that depends on the exact number.'
@@ -1223,6 +1237,20 @@ function guardLine(now, budget) {
   }
 }
 
+// Whether this session has fast mode on. No hook input carries it; the status
+// line JSON does, as `fast_mode`, and feed.js keeps that in this session's
+// feed slot. A session with no slot - no status line installed - reads as off,
+// so the clause is never said on a guess.
+function fastModeFor(sessionId) {
+  if (!sessionId) return false;
+  try {
+    const slot = feed.readFeed()[sessionId];
+    return Boolean(slot && slot.fastMode === true);
+  } catch (err) {
+    return false;
+  }
+}
+
 async function run(now, hookInput) {
   if (String(process.env.USAGE_LIMITS_BRIEF || '').toLowerCase() === 'off') return '';
 
@@ -1414,6 +1442,9 @@ async function run(now, hookInput) {
   if (offering) mode.adviceOffer(advice.id, sessionId, now);
 
   const pressureNow = pressure(binding, now, config, Number.isFinite(yourTurnsLeft) ? yourTurnsLeft : view.turnsLeft);
+  // Fast mode changes what the window's figures mean, so a toggle is a change
+  // worth saying even when nothing else has moved.
+  const fastMode = fastModeFor(sessionId);
 
   // Say nothing when nothing a decision depends on has moved.
   //
@@ -1430,6 +1461,7 @@ async function run(now, hookInput) {
     active > 1 ? 'shared' : 'solo',
     carry && carry.armed ? 'relay' : '-',
     offering ? 'advice' : '-',
+    fastMode ? 'fast' : '-',
   ].join('|');
   if (!budget.policy.briefWhenUnchanged && pressureNow === 'roomy') {
     const slots = readCache();
@@ -1488,6 +1520,7 @@ async function run(now, hookInput) {
     pointsBeyondSnapshot: (binding && binding.pointsBeyondSnapshot) || 0,
     snapshotAge: view.snapshotAge,
     snapshotStale: Number.isFinite(view.snapshotAgeMs) && view.snapshotAgeMs >= SNAPSHOT_TRUST_MS,
+    fastMode,
     // The turn count that matters for this session is its share of a shared
     // budget, not the whole window's. Escalating on the whole window meant a
     // count that looked comfortable while the part actually available here was
@@ -1554,6 +1587,7 @@ module.exports = { withBugcheck, sayOnce, shapeOf, saidFile, REPEAT_MS,
   LARGE_CONTEXT_TOKENS,
   SNAPSHOT_TRUST_MS,
   settings,
+  fastModeFor,
   keepSlots,
   pickCached,
   mergeCache,

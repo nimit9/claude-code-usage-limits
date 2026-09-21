@@ -773,3 +773,83 @@ test('a per-model weekly says that only a model switch frees it', () => {
   const shared = brief.briefText({ binding: { key: 'five_hour', label: '5-hour', percentUsed: 66 }, pressure: 'roomy' });
   assert.strictEqual(shared.indexOf('counts'), -1);
 });
+
+// Fast mode, per code.claude.com/docs/en/fast-mode: on a subscription it is
+// "available via usage credits only and not included in the subscription rate
+// limits", and per /docs/en/prompt-caching the first request sent with it on
+// "reads the entire conversation history with no cache hits". One clause, in
+// the opening line, only while it is on.
+test('fast mode is one clause of the opening line, and only when it is on', () => {
+  const on = brief.briefText({
+    binding: { key: 'five_hour', label: '5-hour', percentUsed: 28, stale: false },
+    turnsLeft: 159,
+    resetsIn: '2h 10m',
+    pressure: 'roomy',
+    fastMode: true,
+  });
+  const opening = on.split('\n')[0].split('. ')[0];
+  assert.match(
+    opening,
+    /^\[usage-limits\] binding window is 5-hour 28% used, about 159 turns of headroom, resets in 2h 10m; fast mode on, billed from usage credits rather than this window, and its first turn re-reads the whole context uncached\.$/
+  );
+  assert.strictEqual(on.split('fast mode').length, 2, 'said once');
+
+  const off = brief.briefText({
+    binding: { key: 'five_hour', label: '5-hour', percentUsed: 28, stale: false },
+    turnsLeft: 159,
+    resetsIn: '2h 10m',
+    pressure: 'roomy',
+    fastMode: false,
+  });
+  assert.doesNotMatch(off, /fast mode/);
+  assert.doesNotMatch(brief.briefText({ binding: null, pressure: 'unknown' }), /fast mode/, 'absent means off');
+  // With no window reading it still belongs to the opening line.
+  assert.match(brief.briefText({ binding: null, pressure: 'unknown', fastMode: true }), /^\[usage-limits\] no usable window reading; fast mode on,/);
+});
+
+test('fastModeFor reads the fast_mode the status line recorded for this session', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const feed = require('../skills/usage-limits/scripts/feed.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-limits-brief-fast-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = dir;
+  try {
+    assert.strictEqual(brief.fastModeFor('s1'), false, 'no feed yet reads as off');
+    let all = feed.record({}, { session_id: 's1', model: { id: 'claude-opus-5' }, fast_mode: true }, NOW);
+    all = feed.record(all, { session_id: 's2', model: { id: 'claude-opus-5' } }, NOW);
+    feed.writeFeed(all);
+    assert.strictEqual(brief.fastModeFor('s1'), true);
+    assert.strictEqual(brief.fastModeFor('s2'), false, 'another session with it off');
+    assert.strictEqual(brief.fastModeFor(null), false);
+    fs.writeFileSync(feed.feedFile(), '{not json');
+    assert.strictEqual(brief.fastModeFor('s1'), false, 'a broken feed file is off, never a throw');
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The corrected figure is the snapshot plus local spend at a learned price. It
+// can land on either side of the account - on 2026-09-20 it ran 13 to 17 points
+// high - so it is an estimate. Only the refused correction, where the raw
+// snapshot is all that is shown, is a lower bound and may be called a floor.
+test('an aged snapshot is called an estimate; only a refused correction is a floor', () => {
+  const base = {
+    binding: { key: 'five_hour', label: '5-hour', percentUsed: 63, stale: false },
+    turnsLeft: 40,
+    resetsIn: '2h',
+    pressure: 'roomy',
+    snapshotAge: '24m',
+  };
+  const aged = brief.briefText(Object.assign({}, base, { snapshotStale: true }));
+  assert.match(aged, /Treat that percentage as an estimate rather than a reading, high or low: the account snapshot behind it is 24m old/);
+  assert.doesNotMatch(aged, /floor/);
+
+  const refused = brief.briefText(Object.assign({}, base, { correctionUnreliable: true, pointsBeyondSnapshot: 12 }));
+  assert.match(refused, /5-hour 63% used at the last real reading/);
+  assert.match(refused, /That percentage is a floor, not a current reading/);
+  assert.doesNotMatch(refused, /estimate rather than a reading/);
+});

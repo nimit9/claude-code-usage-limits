@@ -188,6 +188,14 @@ function update(all, sessionId, transcriptPath, now, options) {
     subagentFiles(transcriptPath, sessionId).map((file) => ({ file, sidechain: true }))
   );
 
+  // Each subagent transcript is priced at the model its own records name. One
+  // that names none is priced at this session's model: the newest main-thread
+  // turn read here, or failing that the tail of the session transcript, read
+  // only if a record actually asks.
+  let mainModel = null;
+  const readParent = usage.sessionModelReader(transcriptPath);
+  const sessionModel = () => mainModel || readParent();
+
   for (const entry of files) {
     const key = path.resolve(entry.file);
     const read = readNewLines(entry.file, session.cursors[key]);
@@ -197,8 +205,9 @@ function update(all, sessionId, transcriptPath, now, options) {
         session.prompts += 1;
         continue;
       }
-      const event = usage.eventFrom(line, seen, project);
+      const event = usage.eventFrom(line, seen, project, entry.sidechain ? sessionModel : null);
       if (!event || event.rejected) continue;
+      if (!entry.sidechain && !event.sidechain && event.model) mainModel = event.model;
       apply(session, event, entry.sidechain || Boolean(event.sidechain), delta);
     }
     session.cursors[key] = read.next;

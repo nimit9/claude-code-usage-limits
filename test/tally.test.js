@@ -313,3 +313,65 @@ test('formatTally and formatClosed use the singular for one of something', () =>
   assert.match(text, /This session: 1 prompt, 1 turn,/);
   assert.match(tally.formatClosed(one, NOW), /: 1 prompt, 1 turn,/);
 });
+
+// The turn() helper's call on Opus 5: (100 * 5 + 1000 * 0.5 + 200 * 25) / 1e6.
+const OPUS_CALL = 0.006;
+// The same call on Sonnet 5: (100 * 2 + 1000 * 0.2 + 200 * 10) / 1e6.
+const SONNET_CALL = 0.0024;
+
+function sonnetTurn(id, at) {
+  return turn(id, at, {
+    isSidechain: true,
+    agentId: 'abc',
+    message: {
+      id: 'msg_' + id,
+      model: 'claude-sonnet-5',
+      usage: { input_tokens: 100, cache_read_input_tokens: 1000, cache_creation_input_tokens: 0, output_tokens: 200 },
+    },
+  });
+}
+
+function namelessTurn(id, at) {
+  return turn(id, at, {
+    isSidechain: true,
+    agentId: 'def',
+    message: {
+      id: 'msg_' + id,
+      usage: { input_tokens: 100, cache_read_input_tokens: 1000, cache_creation_input_tokens: 0, output_tokens: 200 },
+    },
+  });
+}
+
+// Six Sonnet agents under a Fable session were once suspected of being tallied
+// at the session's rate. Each transcript is priced at the model its own records
+// name; only a record with no model at all is priced at the session's, and
+// that is the newest main-thread model seen, or the parent transcript's tail
+// when this update read no main-thread turn.
+test('update prices each subagent transcript at its own model and a nameless one at the session model', () => {
+  const box = sandbox();
+  try {
+    fs.writeFileSync(box.transcript, turn(1, NOW) + '\n');
+    fs.mkdirSync(box.subagentDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(box.subagentDir, 'agent-abc.jsonl'),
+      sonnetTurn('a1', NOW + MINUTE) + '\n' + sonnetTurn('a2', NOW + 2 * MINUTE) + '\n'
+    );
+    fs.writeFileSync(path.join(box.subagentDir, 'agent-def.jsonl'), namelessTurn('d1', NOW + 2 * MINUTE) + '\n');
+    const all = {};
+    const first = tally.update(all, SESSION, box.transcript, NOW + 3 * MINUTE, {});
+    const expected = OPUS_CALL + 2 * SONNET_CALL + OPUS_CALL;
+    assert.ok(Math.abs(first.session.cost - expected) < 1e-12, 'one Opus turn, two Sonnet calls, one nameless call at Opus: got ' + first.session.cost);
+    assert.ok(Math.abs(first.session.models['claude-sonnet-5'].cost - 2 * SONNET_CALL) < 1e-12);
+    assert.strictEqual(first.session.models['claude-opus-5'].turns, 2, 'the nameless call is counted as the session model');
+    assert.strictEqual(first.session.subagentTurns, 3);
+
+    // The next update reads no main-thread line, so the fallback has to come
+    // from the transcript on disk rather than from this call's own reading.
+    fs.appendFileSync(path.join(box.subagentDir, 'agent-def.jsonl'), namelessTurn('d2', NOW + 4 * MINUTE) + '\n');
+    const next = tally.update(all, SESSION, box.transcript, NOW + 5 * MINUTE, {});
+    assert.ok(Math.abs(next.delta.cost - OPUS_CALL) < 1e-12, 'still the session model: got ' + next.delta.cost);
+    assert.strictEqual(next.session.models['claude-opus-5'].turns, 3);
+  } finally {
+    box.restore();
+  }
+});
