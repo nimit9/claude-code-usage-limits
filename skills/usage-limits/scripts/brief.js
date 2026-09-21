@@ -107,6 +107,40 @@ function cacheFile() {
   return path.join(dir, 'usage-limits-brief.json');
 }
 
+// The same brief seconds apart is what a burst of task notifications makes:
+// each one arrives as a prompt and each one got the whole line - ten copies in
+// a row on 2026-09-20. Nothing has moved in ninety seconds, so the second copy
+// carries nothing and is not said. Only the hook path uses this; run() still
+// returns the text. USAGE_LIMITS_BRIEF_REPEAT=1 turns it off.
+const REPEAT_MS = 90 * 1000;
+function saidFile() {
+  return path.join(path.dirname(cacheFile()), 'usage-limits-brief-said.json');
+}
+function shapeOf(text) {
+  return String(text || '').replace(/\d+/g, '#');
+}
+function sayOnce(sessionId, text, now) {
+  if (!text || process.env.USAGE_LIMITS_BRIEF_REPEAT === '1') return text;
+  const at = Number.isFinite(now) ? now : Date.now();
+  const key = String(sessionId || '_');
+  const shape = shapeOf(text);
+  let all = {};
+  try {
+    all = JSON.parse(fs.readFileSync(saidFile(), 'utf8')) || {};
+  } catch (err) {
+    all = {};
+  }
+  const last = all[key];
+  if (last && Number.isFinite(last.at) && at - last.at < REPEAT_MS && last.shape === shape) return '';
+  const next = {};
+  for (const [k, v] of Object.entries(all)) if (v && Number.isFinite(v.at) && at - v.at < 60 * 60 * 1000) next[k] = v;
+  next[key] = { at, shape };
+  try {
+    usage.writeJsonAtomic(saidFile(), next);
+  } catch (err) {
+  }
+  return text;
+}
 // One slot per session. A single shared slot meant that alternating between
 // two Claude Code windows invalidated the cache on every prompt, so neither
 // ever got a hit and both paid for a full scan each time.
@@ -1470,7 +1504,7 @@ if (require.main === module) {
         (process.argv.includes('--host') && process.argv[process.argv.indexOf('--host') + 1] === 'gemini') ||
         process.argv.includes('--gemini-hook')
       );
-      const text = await run(Date.now(), input);
+      const text = sayOnce(input && input.session_id, await run(Date.now(), input), Date.now());
       return { text, isGeminiHook };
     })
     .then(
@@ -1504,7 +1538,7 @@ function withBugcheck(text) {
   return text;
 }
 
-module.exports = { withBugcheck,
+module.exports = { withBugcheck, sayOnce, shapeOf, saidFile, REPEAT_MS,
   DEFAULTS,
   aheadOfPace,
   pacingMatters,
