@@ -932,13 +932,13 @@ function briefText(input) {
       : parts.pressure === 'tight'
         ? 'The budget is nearly gone, so make being cut off cheap rather than doing ' +
           'less. Carry on with the whole request at full quality; do not narrow ' +
-          'it or stop to ask. The most valuable part lands first, saved at clean ' +
+          'it or stop to ask. The most valuable part lands first, save at clean ' +
           'boundaries, with a running note of what is done, what is next and ' +
           'which files are mid-change. Say in one line what may not land before ' +
           'the reset, then keep working; for a mechanical remainder, node ' +
           'scripts/usage.js --recommend (skill directory) names the effort and model.'
         : 'Open with one short line stating this and that the request fits, then ' +
-          'work. There is room: full quality, the whole request, nothing held ' +
+          'get on with the work. There is room: full quality, the whole request, nothing held ' +
           'back, since unspent budget is lost at the reset.';
 
   // The mistake this guards against: quoting the roomiest window and pinning
