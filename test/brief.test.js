@@ -148,7 +148,7 @@ test('the line names the binding window and hangs its numbers off it', () => {
   assert.match(text, /resets in 3h 52m/);
   assert.match(text, /Other windows: 5-hour 47%/);
   assert.match(text, /This session: 229 turns/);
-  assert.match(text, /Open your reply with one short line/);
+  assert.match(text, /Open with one short line/);
 });
 
 test('the numbers cannot be read against the wrong window', () => {
@@ -167,7 +167,7 @@ test('the numbers cannot be read against the wrong window', () => {
   assert.match(binding, /52 turns/);
   assert.match(binding, /1h 50m/);
   assert.doesNotMatch(binding, /weekly/, 'the roomy window must not sit beside those figures');
-  assert.match(text, /Quote the binding window, not whichever one has the most left/);
+  assert.match(text, /Quote the binding window; its turns and reset time belong to it alone/);
 });
 
 test('a tight budget changes the instruction, not just the numbers', () => {

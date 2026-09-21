@@ -930,28 +930,21 @@ function briefText(input) {
           'read. Say in one line what will land after the reset instead of ' +
           'before it, then keep working until the window actually ends.'
       : parts.pressure === 'tight'
-        ? 'The budget is nearly gone, so make being cut off cheap rather than ' +
-          'doing less. Carry on with the whole request at full quality: this is ' +
-          'not a reason to narrow the work, drop parts of it, or stop to ask ' +
-          'whether to go on. Order it so the most valuable part lands first, ' +
-          'save at clean boundaries as you go, and keep a short running note of ' +
-          'what is done, what is next, and which files are mid-change, so that ' +
-          'stopping at any moment loses nothing. Say in one line what may not ' +
-          'land before the reset, then keep working. If part of what remains is ' +
-          'mechanical, node scripts/usage.js --recommend (from the skill directory) ' +
-          'names the effort and model it should run at.'
-        : 'Open your reply with one short line stating this and confirming the ' +
-          'request fits, then get on with the work. Keep it to a single line. ' +
-          'There is room, so use it: work at full quality, take on the whole ' +
-          'request, and do not hold budget back or economise, as anything left ' +
-          'unspent is lost at the reset rather than saved.';
+        ? 'The budget is nearly gone, so make being cut off cheap rather than doing ' +
+          'less. Carry on with the whole request at full quality; do not narrow ' +
+          'it or stop to ask. The most valuable part lands first, saved at clean ' +
+          'boundaries, with a running note of what is done, what is next and ' +
+          'which files are mid-change. Say in one line what may not land before ' +
+          'the reset, then keep working; for a mechanical remainder, node ' +
+          'scripts/usage.js --recommend (skill directory) names the effort and model.'
+        : 'Open with one short line stating this and that the request fits, then ' +
+          'work. There is room: full quality, the whole request, nothing held ' +
+          'back, since unspent budget is lost at the reset.';
 
   // The mistake this guards against: quoting the roomiest window and pinning
   // the binding window figures to it.
   const care =
-    ' Quote the binding window, not whichever one has the most left. The turns ' +
-    'and reset time above belong to the binding window alone; do not read them ' +
-    'against another window percentage.';
+    ' Quote the binding window; its turns and reset time belong to it alone.';
 
   // Finished work closes with what it cost. Not every reply: a progress note
   // mid-task is not the moment, and once the budget is gone nothing further

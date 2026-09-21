@@ -137,6 +137,11 @@ function pulseText(parts) {
 
   const head = '[usage-limits] ' + (parts.fanout ? 'Before this fan-out: ' : '') + bits.join(', ') + '.';
   if (parts.fanout) {
+    // Parallel Agent calls fire this once per call, so the advice sentence was
+    // being said six times in a row for one reading. The reading itself is
+    // never throttled; the advice is said once per session per ten minutes,
+    // through the same state file as every other throttle here.
+    if (parts.advice === false) return head;
     // Said before every Workflow or Agent call. The agents spend this same
     // window, nothing can speak again until they stop, and a main-loop turn
     // with a large context costs more than one whole fresh-context agent.
@@ -289,10 +294,12 @@ async function run(now, hookInput) {
   // The cheap path, and the one taken almost every time. A fan-out is never
   // throttled: it is said every time, because every time it is about to cost.
   if (!fanout && !due(all, throttleKey, now, every)) return '';
+  const adviceKey = (sessionId || '_') + '#fanout-advice';
+  const sayAdvice = fanout && due(all, adviceKey, now, 10 * 60 * 1000);
 
   // Claimed before the scan rather than after, so a slow scan cannot let a
   // second tool call start another one.
-  writeState(trim(all, throttleKey, now));
+  writeState(sayAdvice ? trim(trim(all, throttleKey, now), adviceKey, now) : trim(all, throttleKey, now));
 
   // A reading as old as the interval is replaced with the one Claude Code
   // would take for /usage, so a turn that runs for an hour is measured
@@ -410,6 +417,7 @@ async function run(now, hookInput) {
     sessions: active,
     pressure,
     fanout,
+    advice: sayAdvice,
   });
   return recheck ? (spoken ? spoken + ' ' + recheck : recheck) : spoken;
 }

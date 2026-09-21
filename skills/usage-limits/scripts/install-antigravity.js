@@ -48,7 +48,8 @@ function pluginDir() {
 // runs hook commands through `cmd /c` on Windows and `sh -c` elsewhere, so the
 // quoting has to survive both.
 function quote(file) {
-  return '"' + String(file).replace(/\\/g, '/') + '"';
+  const normalized = String(file).replace(/\\/g, '/');
+  return normalized.includes(' ') ? '"' + normalized + '"' : normalized;
 }
 
 function scriptPath(name) {
