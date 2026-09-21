@@ -132,7 +132,47 @@ function readSaid() {
   }
 }
 function keepSaidFor(key) {
-  return /#(standing|cachemiss)$/.test(key) ? 24 * 60 * 60 * 1000 : 60 * 60 * 1000;
+  return /#(standing|cachemiss|stale)$/.test(key) ? 24 * 60 * 60 * 1000 : 60 * 60 * 1000;
+}
+
+// A plugin update takes effect when Claude Code restarts, so a session that
+// began before one keeps running the old code for as long as it lives. On
+// 2026-09-20 that put a session on 1.34.1 beside one on 1.36.0: the older one
+// saw the single relay slot its version still had, judged it taken, wrote its
+// own scheduled task by hand, and that task failed the way 1.34.1's always
+// did, while the newer session's relay worked. Nothing in the plugin can
+// upgrade a running session, but it can say so, once, with the two numbers.
+function installedVersion(configDir) {
+  try {
+    const file = path.join(configDir, 'plugins', 'installed_plugins.json');
+    const rows = JSON.parse(fs.readFileSync(file, 'utf8')).plugins['usage-limits@usage-limits'];
+    if (!Array.isArray(rows) || !rows.length) return null;
+    const user = rows.find((r) => r && r.scope === 'user') || rows[rows.length - 1];
+    return user && typeof user.version === 'string' ? user.version : null;
+  } catch (err) {
+    return null;
+  }
+}
+function runningVersion() {
+  try {
+    return require('../../../package.json').version;
+  } catch (err) {
+    return null;
+  }
+}
+function staleVersionFor(sessionId, now, dir) {
+  const installed = installedVersion(dir || configDir());
+  const running = runningVersion();
+  if (!installed || !running || installed === running) return null;
+  const at = Number.isFinite(now) ? now : Date.now();
+  const key = String(sessionId || '_') + '#stale';
+  const all = readSaid();
+  const entry = all[key];
+  if (entry && Number.isFinite(entry.at) && at - entry.at < keepSaidFor(key) && entry.seen === installed) return null;
+  all[key] = { at, seen: installed };
+  writeSaid(all, at);
+  return 'usage-limits ' + installed + ' is installed but this session still runs ' + running +
+    ', because a plugin update applies at the next start; a relay or cap set here follows the older rules until then.';
 }
 function writeSaid(all, at) {
   const next = {};
@@ -684,6 +724,8 @@ function briefText(input) {
   // well as what it is, because the source is the whole point: settings.json
   // said xhigh for an entire session that was running something else.
   if (parts.tier) sentences.push(parts.tier);
+  // Once per session, and only when the installed version is not this one.
+  if (parts.staleVersion) sentences.push(parts.staleVersion);
   const bounded = mode.boundsNote(bounds);
   if (bounded) sentences.push(bounded);
   if (parts.planChanged) {
@@ -1577,6 +1619,7 @@ async function run(now, hookInput) {
     tier,
     standingShort,
     cacheMissWhy: cacheMissWhyFor(sessionId, now),
+    staleVersion: staleVersionFor(sessionId, now),
     adviceText: terse && offering ? advice.text : null,
     relay: carry,
     voiceNote,
@@ -1679,7 +1722,7 @@ function withBugcheck(text) {
   return text;
 }
 
-module.exports = { withBugcheck, sayOnce, shapeOf, saidFile, REPEAT_MS,
+module.exports = { withBugcheck, sayOnce, shapeOf, saidFile, REPEAT_MS, staleVersionFor, installedVersion, runningVersion,
   readSaid, standingSaid, markStanding, standingShortFor, STANDING_SHORT, cacheMissWhyFor, missReason, MISS_RECENT_MS,
   DEFAULTS,
   aheadOfPace,

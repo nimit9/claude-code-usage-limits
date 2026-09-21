@@ -375,6 +375,15 @@ What changes while it is armed is what Claude is told at the wall. Instead of
 cut off now costs the wait rather than the work, and that the continuation is a
 prompt to be acted on rather than a summary for a person to read.
 
+**A session that started before an update keeps the old code.** A plugin
+update applies when Claude Code restarts, so two sessions can run two versions
+at once; on 2026-09-20 a session still on 1.34.1 saw the single relay slot that
+version had, took it for occupied, scheduled its own wake by hand, and that
+wake failed the way 1.34.1's always did, while the session on 1.36.0 resumed
+fine. Nothing can upgrade a running session, so since 1.38.0 the budget line
+says so once: the installed version, the running one, and that a relay or cap
+set in that session follows the older rules until it restarts.
+
 **Two things that stopped it in practice, both fixed in 1.36.0.** A fresh
 Claude Code start asks two questions nobody is there to answer at four in the
 morning: whether to trust the folder, and whether bypass permissions is meant.
