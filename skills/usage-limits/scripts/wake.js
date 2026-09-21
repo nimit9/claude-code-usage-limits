@@ -242,7 +242,8 @@ function pointerPrompt(file) {
   return (
     'The usage window has reset and this is the plugin picking the work back up, not a new request. ' +
     'The full hand-off is in the file ' + file + ' - read it with the Read tool now and carry on from it ' +
-    'at full quality, without re-asking what to do.'
+    'at full quality, without re-asking what to do. If the working directory is not the project folder, ' +
+    'it was resumed from a trusted folder on purpose: use absolute paths.'
   );
 }
 
@@ -254,6 +255,7 @@ function cmdArg(text) {
 
 function visibleArgs(record, config, promptFile) {
   const args = ['--resume', record.id];
+  if (record.launchCwd) args.push('--add-dir', record.cwd);
   if (config && config.permissionMode) args.push('--permission-mode', config.permissionMode);
   if (config && config.model) args.push('--model', config.model);
   args.push('--remote-control', 'usage-limits relay ' + (record.project || path.basename(record.cwd)));
@@ -266,7 +268,8 @@ function launcherScript(record, config, cli, promptFile, exitPath) {
   return [
     '@echo off',
     'title Claude relay - ' + name,
-    'cd /d ' + cmdArg(record.cwd),
+    'cd /d ' + cmdArg(record.launchCwd || record.cwd),
+    'set DISABLE_AUTOUPDATER=1',
     // Seen live on 2026-09-14: launched from inside a session, the window
     // inherited that session's markers - transcript saving was off (the
     // child-session marker) and the hooks took it for the parent (its id).
@@ -318,7 +321,7 @@ function sleepMs(ms) {
 // Pre-quoted arguments go through verbatim, because Node's own quoting is
 // for programs that parse like C, and cmd does not.
 function openWindow(launcher, exitPath, record) {
-  const run = spawnSync('cmd.exe', ['/d', '/c', 'start', '"Claude relay"', '/D', cmdArg(record.cwd), cmdArg(launcher)], {
+  const run = spawnSync('cmd.exe', ['/d', '/c', 'start', '"Claude relay"', '/D', cmdArg(record.launchCwd || record.cwd), cmdArg(launcher)], {
     encoding: 'utf8',
     timeout: 30000,
     windowsHide: true,
@@ -698,7 +701,18 @@ async function run(now, argv, overrides) {
 
   if (record.host !== 'codex') {
 
-    const pre = relay.preflightPrompts(record.cwd, config);
+    if (record.launchCwd) {
+      try {
+        fs.mkdirSync(record.launchCwd, { recursive: true });
+      } catch (err) {
+      }
+    }
+    try {
+      const cj = relay.claudeJsonFile();
+      if (fs.existsSync(cj)) fs.copyFileSync(cj, cj + '.bak-usage-limits-wake');
+    } catch (err) {
+    }
+    const pre = relay.preflightPrompts(record.launchCwd || record.cwd, config);
 
     if (pre.ok && pre.changes.length) relay.note('wake ' + record.id + ': pre-answered ' + pre.changes.join(', '), now);
 

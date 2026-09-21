@@ -249,6 +249,58 @@ function projectKeys(cwd) {
   const back = raw.replace(/\//g, '\\');
   return [...new Set(process.platform === 'win32' ? [raw, fwd, back] : [raw])];
 }
+// Claude Code never writes trust for the home folder itself (its security
+// page says so, and 2026-09-20 proved it), so a session that lives in $HOME
+// is resumed from a small folder under the config dir that can be trusted,
+// with --add-dir pointing back at the real one. --resume <id> finds the
+// transcript from anywhere on 2.1.223 and later.
+function isHome(dir) {
+  const norm = (p) => String(p || '').replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase();
+  return Boolean(dir) && norm(dir) === norm(os.homedir());
+}
+function launchDirFor(cwd) {
+  if (!isHome(cwd)) return cwd;
+  const dir = path.join(configDir(), 'relay-cwd');
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (err) {
+  }
+  return dir;
+}
+function readSettings() {
+  try {
+    return JSON.parse(fs.readFileSync(settingsFile(), 'utf8').replace(/^\uFEFF/, ''));
+  } catch (err) {
+    return null;
+  }
+}
+function settingIs(key, value) {
+  const parsed = readSettings();
+  return Boolean(parsed) && parsed[key] === value;
+}
+function applySetting(key, value) {
+  const file = settingsFile();
+  let raw = null;
+  let parsed = {};
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+    parsed = JSON.parse(raw.replace(/^\uFEFF/, ''));
+  } catch (err) {
+    if (raw !== null) return { changed: false, error: 'settings.json is not readable JSON; left untouched' };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { changed: false, error: 'settings.json is not an object; left untouched' };
+  if (parsed[key] === value) return { changed: false };
+  parsed[key] = value;
+  try {
+    fs.mkdirSync(configDir(), { recursive: true });
+    if (raw !== null) fs.writeFileSync(file + '.bak-usage-limits', raw);
+    fs.writeFileSync(file, JSON.stringify(parsed, null, 2) + '\n');
+  } catch (err) {
+    return { changed: false, error: err.message };
+  }
+  return { changed: true, file };
+}
+
 function preflightPrompts(cwd, config, options) {
   const file = claudeJsonFile();
   let raw = null;
@@ -275,6 +327,15 @@ function preflightPrompts(cwd, config, options) {
   if (config && config.permissionMode === 'bypassPermissions' && parsed.bypassPermissionsModeAccepted !== true) {
     parsed.bypassPermissionsModeAccepted = true;
     changes.push('bypass permissions accepted');
+  }
+  // The current build gates that dialog on settings.json instead.
+  if (config && config.permissionMode === 'bypassPermissions') {
+    if (options && options.dry) {
+      if (!settingIs('skipDangerousModePermissionPrompt', true)) changes.push('skipDangerousModePermissionPrompt in settings.json');
+    } else {
+      const skipped = applySetting('skipDangerousModePermissionPrompt', true);
+      if (skipped.changed) changes.push('skipDangerousModePermissionPrompt in settings.json');
+    }
   }
   if (raw === null) changes.push('created ' + file);
   if (!changes.length || (options && options.dry)) return { ok: true, file, changes, dry: Boolean(options && options.dry) };
@@ -991,6 +1052,12 @@ function armable(input) {
   if (!binding || binding.percentUsed === null || binding.percentUsed === undefined) return { ok: false, why: 'no usable window reading' };
   if (binding.stale) return { ok: false, why: 'the reading is stale' };
   if (binding.percentUsed < config.at) return { ok: false, why: 'below ' + config.at + ' per cent' };
+  // The account's own reading has to be past the mark, not the local
+  // extrapolation on top of it: on 2026-09-20 the estimate ran 17 points hot
+  // and a relay armed on it would have armed a whole window early.
+  const beyond = Number.isFinite(binding.pointsBeyondSnapshot) ? binding.pointsBeyondSnapshot : 0;
+  const raw = binding.percentUsed - Math.max(0, beyond);
+  if (raw < config.at) return { ok: false, why: 'the account reads ' + Math.round(raw) + ' per cent; only the local estimate (' + Math.round(binding.percentUsed) + ') is past ' + config.at };
   if (!Number.isFinite(binding.resetsAt)) return { ok: false, why: 'the window has no known reset time' };
   if (!options.sessionId) return { ok: false, why: 'no session id' };
   const work = workWithContinuation(options.work, options.sessionId);
@@ -1020,13 +1087,21 @@ function arm(input) {
   // really turned over before a resume fires; a time a person typed does not
   // want fifteen minutes added to it. Still floored a minute out, because a
   // task registered for a moment already past fires immediately.
-  const when = Number.isFinite(options.at)
+  let when = Number.isFinite(options.at)
     ? Math.max(options.at, now + MINUTE)
     : wakeAt(options.resetsAt, config.graceMinutes, now);
   if (!when) return { ok: false, error: 'no reset time to wake after' };
 
   const state = read();
   const id = options.sessionId;
+  // Two windows starting in the same second race each other for .claude.json
+  // (verified: it corrupts, and onboarding comes back). A minute apart is safe.
+  for (let guard = 0; guard < 20; guard++) {
+    const clash = records(state).find((r) => r.id !== id && Number.isFinite(r.wakeAt) && Math.abs(r.wakeAt - when) < MINUTE);
+    if (!clash) break;
+    when = clash.wakeAt + MINUTE;
+  }
+  const launchCwd = launchDirFor(options.cwd || process.cwd());
   const name = taskName(id, when);
   // Names are unique per wake now, so re-arming no longer replaces the old
   // registration by name; the previous one has to be retired by hand or it
@@ -1042,7 +1117,7 @@ function arm(input) {
   const previousTask = existing && existing.task && existing.task !== name ? existing.task : null;
   let preflight = null;
   if (config.mode === 'resume' && (!options.hostName || options.hostName === host.CLAUDE) && options.preflight !== false) {
-    preflight = preflightPrompts(options.cwd || process.cwd(), config);
+    preflight = preflightPrompts(launchCwd, config);
     if (preflight.ok && preflight.changes.length) note('pre-answered for ' + id + ': ' + preflight.changes.join(', '), now);
     else if (!preflight.ok) note('could not pre-answer the start-up questions for ' + id + ': ' + preflight.error, now);
   }
@@ -1076,6 +1151,7 @@ function arm(input) {
     task: scheduled.how === 'none' ? null : name,
     host: options.hostName || host.CLAUDE,
     cwd: options.cwd || process.cwd(),
+    launchCwd: launchCwd !== (options.cwd || process.cwd()) ? launchCwd : null,
     project: options.project || null,
     armedAt: now,
     wakeAt: when,
@@ -1176,6 +1252,7 @@ function status(now) {
     );
     if (armed.warning) lines.push('  Caveat: ' + armed.warning + '.');
     if (armed.preflight && armed.preflight.length) lines.push('  Pre-answered: ' + armed.preflight.join(', '));
+    if (armed.launchCwd) lines.push('  Resumes from ' + armed.launchCwd + ' (the home folder can never be trusted) with --add-dir back to ' + armed.cwd);
     lines.push('  Continuation written: ' + (armed.continuation ? 'yes' : 'not yet'));
   }
   if (!all.length) lines.push('Nothing armed.');
@@ -1312,7 +1389,7 @@ async function doctor(now) {
   // a throwaway is the only honest answer; asking the policy is not.
   if (process.platform === 'win32') {
     for (const rec of records(state)) {
-      const pre = preflightPrompts(rec.cwd, config, { dry: true });
+      const pre = preflightPrompts(rec.launchCwd || rec.cwd, config, { dry: true });
       const quiet = pre.ok && !pre.changes.length;
       add('start-up questions for ' + String(rec.id).slice(0, 8), quiet,
         pre.ok
@@ -1321,7 +1398,7 @@ async function doctor(now) {
         quiet ? 'ok' : 'warn');
     }
     if (!records(state).length && config.mode === 'resume') {
-      const pre = preflightPrompts(process.cwd(), config, { dry: true });
+      const pre = preflightPrompts(launchDirFor(process.cwd()), config, { dry: true });
       const quiet = pre.ok && !pre.changes.length;
       add('start-up questions here', quiet,
         pre.ok
@@ -1453,9 +1530,16 @@ function main(argv) {
   }
   if (command === 'note') {
     const state = read();
-    if (!state.armed) return 'Nothing is armed, so there is nowhere to put a continuation yet.';
+    const all = records(state);
+    if (!all.length) return 'Nothing is armed, so there is nowhere to put a continuation yet.';
+    // This session's own relay; with several armed and none this session's, the id has to be named.
+    const sessionAt = rest.indexOf('--session');
+    const named = sessionAt !== -1 ? rest[sessionAt + 1] : null;
+    const me = named || process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID || null;
+    const target = armedFor(state, me) || (all.length === 1 ? all[0] : null);
+    if (!target) return all.length + ' relays are armed (' + all.map((r) => r.id.slice(0, 8)).join(', ') + ') and none is this session\'s; pass --session <id>.';
     const fromFile = rest.indexOf('--file') !== -1 ? rest[rest.indexOf('--file') + 1] : null;
-    let text = fromFile ? '' : rest.filter((item) => item !== '--file').join(' ');
+    let text = fromFile ? '' : rest.filter((item, i) => item !== '--file' && item !== '--session' && !(sessionAt !== -1 && i === sessionAt + 1)).join(' ');
     if (fromFile) {
       try {
         text = fs.readFileSync(fromFile, 'utf8');
@@ -1463,8 +1547,8 @@ function main(argv) {
         return 'Could not read ' + fromFile;
       }
     }
-    const written = saveContinuation(state.armed.id, text);
-    return written ? 'Continuation saved for the relay (' + written + ').' : 'Nothing to save.';
+    const written = saveContinuation(target.id, text, { force: Boolean(named) });
+    return written ? 'Continuation saved for the relay of ' + target.id.slice(0, 8) + ' (' + written + ').' : 'Nothing to save.';
   }
   if (command === 'cancel') {
     // This session's own relay by default; --all takes every session's down.
@@ -1587,7 +1671,7 @@ if (require.main === module) {
 }
 
 module.exports = { workWithContinuation, reapLost, hiddenAction, BUGCHECK_LINE,
-  records, armedFor, putRecord, dropRecord, preflightPrompts, claudeJsonFile, projectKeys,
+  records, armedFor, putRecord, dropRecord, preflightPrompts, claudeJsonFile, projectKeys, isHome, launchDirFor, applySetting, settingIs,
   DEFAULTS,
   MINUTE,
   main,
