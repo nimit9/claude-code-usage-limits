@@ -1187,7 +1187,7 @@ ever told it the limit was close. The reader now keeps the newest reading of eac
 meter and prefers the one that actually describes a window. Nothing is merged or
 synthesised - the payload returned is one Codex really wrote.
 
-### An old snapshot is a floor, not a reading
+### An old snapshot is an estimate, not a reading
 
 There was already a warning for a reading spent past its own remainder. It could
 never fire for a snapshot taken at the start of a window, because everything
@@ -1199,7 +1199,11 @@ plugin's live reading was rate-limited into backoff, and the correction was
 quietly carrying the entire difference on its own. A correction is a good
 adjustment to a recent snapshot and a bad substitute for an old one, because the
 pricing error compounds with every point it has to bridge. Past fifteen minutes
-the brief now says the figure is a floor and points at `/usage`.
+the brief now says the figure is an estimate that can run high or low and points
+at `/usage`. It is only called a floor when the correction has been refused
+outright and the raw snapshot is all that is shown, since that really is a
+lower bound; a snapshot plus a correction is not, and on 2026-09-20 it ran 13
+to 17 points high.
 
 ### The ceiling
 

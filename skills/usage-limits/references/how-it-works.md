@@ -211,9 +211,10 @@ your own meter remains the best method anyone outside Anthropic has.
 own cache of the account meter, which refreshes on its own schedule - roughly
 hourly in practice, because the endpoint behind it rate-limits aggressive
 polling. Between refreshes every figure here is the last real reading plus
-arithmetic. That is why an old snapshot is reported as a floor with its age
+arithmetic. That is why an old snapshot is reported as an estimate with its age
 attached rather than dressed up as a current percentage, and why `/usage` is
-the one way to force a fresh reading.
+the one way to force a fresh reading. It is only called a floor when the
+correction has been refused and the raw snapshot is all that is shown.
 
 **A reset time can be in the past.** The cache refreshes when Claude Code
 talks to the API, so an idle spell leaves it behind. A window whose `resets_at`
