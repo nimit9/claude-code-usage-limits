@@ -509,14 +509,16 @@ async function main(argv) {
       headersAt: slot ? slot.headersAt : null,
       model: slot ? slot.model : null,
       modelName: slot ? slot.modelName : null,
-      // Claude Code hands this line the effort outright, so the slot is
-      // already current and nothing else need be read. It is only when the
-      // slot has none - the very first update of a session, or a build that
-      // does not send it - that the transcript is worth a look.
+      // Claude Code hands this line the effort outright, and that value is
+      // read first: the slot beside it was loaded from disk before this
+      // update was stored, so on a session's very first line it is empty and
+      // trusting it printed no effort at all until the second update. The
+      // slot still answers for a build that sends none, and only when it has
+      // none either is the transcript worth a look.
       effort:
-        slot && slot.effort
-          ? slot.effort
-          : view.pickEffort(
+        (input && input.effort && typeof input.effort.level === 'string' && input.effort.level)
+          || (slot && slot.effort)
+          || view.pickEffort(
               null,
               usage.liveEffort(mine || (slot && slot.sessionId) || null),
               collected.settings ? collected.settings.effortLevel : null
