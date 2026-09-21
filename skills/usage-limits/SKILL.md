@@ -630,6 +630,12 @@ which files are mid-change, what must be verified before anything is built on
 it. It is delivered as a prompt, so an instruction beats a summary. If nothing
 is written, the relay falls back to the outstanding todo list, which is worse.
 
+More than one session can be armed at once; each wakes on its own task, and
+cancel takes down only this session's unless --all is given. Arming also
+answers the two start-up questions (folder trust, bypass permissions) in
+.claude.json for the folder it will resume in, so the window does not stop at
+a prompt; doctor says whether they are answered.
+
 **It arms at the end of a reply, not in the middle of one.** Crossing the
 threshold no longer schedules anything by itself: the relay waits for the reply
 to finish, so what it carries is work that reached a boundary rather than a

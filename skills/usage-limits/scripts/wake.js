@@ -529,7 +529,7 @@ function finish(state, record, outcome, detail, now) {
       // No note, or already gone.
     }
   }
-  state.armed = null;
+  relay.dropRecord(state, record.id);
   relay.write(state);
   relay.note('wake ' + record.id + ': ' + outcome + (detail ? ' - ' + detail : ''), now);
   // Last, deliberately: this deletes the task this process is running under,
@@ -546,6 +546,11 @@ function finish(state, record, outcome, detail, now) {
 // `overrides` exists so the retry path can be tested without spawning a CLI or
 // registering a real scheduled task. Production passes nothing and gets the
 // real functions; only the names listed here can be swapped.
+// The record this wake owns, wherever the state keeps it.
+function mine(held, record) {
+  return relay.armedFor(held, record.id);
+}
+
 async function run(now, argv, overrides) {
   const deps = Object.assign(
     { windowReopened, deliverClaude, deliverCodex, toast, userIsPresent, arm: relay.arm, capabilities: relay.capabilities },
@@ -553,9 +558,8 @@ async function run(now, argv, overrides) {
   );
   const id = argOf(argv, '--id');
   const state = relay.read();
-  const record = state.armed;
-  if (!record) return { outcome: 'nothing-armed' };
-  if (id && record.id !== id) return { outcome: 'superseded' };
+  const record = id ? relay.armedFor(state, id) : state.armed;
+  if (!record) return { outcome: relay.records(state).length ? 'superseded' : 'nothing-armed' };
   // Marked before anything else, so a wake that dies part-way (the 8:05 PM
   // one was killed with its console) is told apart from one that never ran.
   record.wokeAt = now;
@@ -587,8 +591,8 @@ async function run(now, argv, overrides) {
     });
     if (again.ok) {
       const held = relay.read();
-      held.armed.attempt = attempt;
-      held.armed.continuation = record.continuation;
+      mine(held, record).attempt = attempt;
+      mine(held, record).continuation = record.continuation;
       relay.write(held);
     }
     relay.note('wake ' + record.id + ': window still at ' + Math.round(reopened.percent) + '%, retry ' + attempt, now);
@@ -627,10 +631,10 @@ async function run(now, argv, overrides) {
       });
       if (again.ok) {
         const held = relay.read();
-        if (held.armed) {
-          held.armed.offlineAttempt = offlineAttempt;
-          held.armed.attempt = record.attempt || 0;
-          held.armed.continuation = record.continuation;
+        if (mine(held, record)) {
+          mine(held, record).offlineAttempt = offlineAttempt;
+          mine(held, record).attempt = record.attempt || 0;
+          mine(held, record).continuation = record.continuation;
           relay.write(held);
         }
         // Said once, on the first miss, then quiet. Twelve toasts through the
@@ -688,6 +692,20 @@ async function run(now, argv, overrides) {
 
   deps.toast('Usage limits: resuming', 'Carrying on with ' + (record.project || path.basename(record.cwd)) + ' where the limit stopped it.');
   const runs = [];
+  // The two start-up questions, answered again right before the launch in
+
+  // case anything reset them since arming.
+
+  if (record.host !== 'codex') {
+
+    const pre = relay.preflightPrompts(record.cwd, config);
+
+    if (pre.ok && pre.changes.length) relay.note('wake ' + record.id + ': pre-answered ' + pre.changes.join(', '), now);
+
+    else if (!pre.ok) relay.note('wake ' + record.id + ': could not pre-answer the start-up questions: ' + pre.error, now);
+
+  }
+
   const delivered = record.host === host.CODEX
     ? deps.deliverCodex(record, prompt, cli, runs)
     : deps.deliverClaude(record, prompt, config, cli, runs);
@@ -732,8 +750,8 @@ async function run(now, argv, overrides) {
     });
     if (again.ok) {
       const held = relay.read();
-      held.armed.attempt = attempt;
-      held.armed.continuation = record.continuation;
+      mine(held, record).attempt = attempt;
+      mine(held, record).continuation = record.continuation;
       relay.write(held);
       deps.toast(
         'Usage limits: retrying',
@@ -771,11 +789,11 @@ async function run(now, argv, overrides) {
     });
     if (nextWindow.ok) {
       const held = relay.read();
-      if (held.armed) {
-        held.armed.attempt = 0;
-        held.armed.offlineAttempt = 0;
-        held.armed.rearms = rearms + 1;
-        held.armed.continuation = record.continuation;
+      if (mine(held, record)) {
+        mine(held, record).attempt = 0;
+        mine(held, record).offlineAttempt = 0;
+        mine(held, record).rearms = rearms + 1;
+        mine(held, record).continuation = record.continuation;
         relay.write(held);
       }
       deps.toast('Usage limits: could not resume',

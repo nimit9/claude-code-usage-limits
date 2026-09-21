@@ -78,7 +78,7 @@ function armAtCompletion(now, hookInput, sessionId) {
   const config = relay.settings(state);
   if (!config.enabled || config.armOn !== 'completion') return null;
   // Already carrying this session forward: nothing to decide.
-  if (state.armed && state.armed.id === sessionId) return null;
+  if (relay.armedFor(state, sessionId)) return null;
 
   const transcript = hookInput && hookInput.transcript_path ? hookInput.transcript_path : null;
   const work = relay.detectWork(transcript, {});

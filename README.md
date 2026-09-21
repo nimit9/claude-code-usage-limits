@@ -344,6 +344,19 @@ What changes while it is armed is what Claude is told at the wall. Instead of
 cut off now costs the wait rather than the work, and that the continuation is a
 prompt to be acted on rather than a summary for a person to read.
 
+**Two things that stopped it in practice, both fixed in 1.36.0.** A fresh
+Claude Code start asks two questions nobody is there to answer at four in the
+morning: whether to trust the folder, and whether bypass permissions is meant.
+On 2026-09-20 the wake opened its window and sat at the trust question until
+morning. Arming now writes both answers into .claude.json for the folder the
+relay will resume in (every spelling of the key, with a backup beside it), the
+wake writes them again right before the launch, and doctor reports when they
+are missing; relay preflight [cwd] does it by hand. And the relay used to hold
+one slot, so a second session arming on the same night was refused or
+displaced the first. Each session now has its own record and its own scheduled
+task; status lists them all, relay cancel takes down this session's, and
+relay cancel --all takes down every one.
+
 | | |
 | --- | --- |
 | **Off by default** | Scheduling an agent to run while nobody is watching is a decision you make on purpose, not one a plugin makes for you. |

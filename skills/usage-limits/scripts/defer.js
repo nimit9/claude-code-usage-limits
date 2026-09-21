@@ -210,7 +210,7 @@ function plan(options) {
 
 function status(now) {
   const state = relay.read();
-  const armed = state.armed;
+  const armed = relay.armedFor(state, process.env.CLAUDE_CODE_SESSION_ID) || state.armed;
   if (!armed) return 'Nothing is deferred.';
   const when = Number(armed.wakeAt);
   const deferred = armed.deferred === true;
@@ -230,9 +230,10 @@ function status(now) {
 
 function cancel() {
   const state = relay.read();
-  if (!state.armed) return 'Nothing was deferred.';
-  const label = formatClock(Number(state.armed.wakeAt));
-  const result = relay.disarm('cancelled by hand', Date.now());
+  const own = relay.armedFor(state, process.env.CLAUDE_CODE_SESSION_ID) || state.armed;
+  if (!own) return 'Nothing was deferred.';
+  const label = formatClock(Number(own.wakeAt));
+  const result = relay.disarm('cancelled by hand', Date.now(), own.id);
   return result && result.ok === false
     ? 'Could not cancel: ' + result.error
     : 'Cancelled the run booked for ' + label + '.';
@@ -286,9 +287,10 @@ function main(argv, now) {
   // session can tell the two apart - they read the same record.
   try {
     const held = relay.read();
-    if (held.armed) {
-      held.armed.deferred = true;
-      held.armed.continuation = Boolean(work);
+    const mine = (typeof sessionId !== 'undefined' && relay.armedFor(held, sessionId)) || held.armed;
+    if (mine) {
+      mine.deferred = true;
+      mine.continuation = Boolean(work);
       relay.write(held);
     }
   } catch (err) {

@@ -196,7 +196,96 @@ function read() {
     config: parsed.config && typeof parsed.config === 'object' && !Array.isArray(parsed.config) ? parsed.config : {},
     armed: parsed.armed && typeof parsed.armed === 'object' && !Array.isArray(parsed.armed) ? parsed.armed : null,
     history: Array.isArray(parsed.history) ? parsed.history.slice(-10) : [],
+    ...(Array.isArray(parsed.others) && parsed.others.length
+      ? { others: parsed.others.filter((r) => r && typeof r === 'object' && !Array.isArray(r) && r.id) }
+      : {}),
   };
+}
+
+/* ------------------------------------------------- more than one session -- */
+
+// state.armed is the record armed first; every further session's record waits
+// in state.others, each with its own scheduled task. Two sessions arming on
+// the same night is the normal case (the plugin was tried ten times before
+// this and one of the failures was the second session being refused), so
+// nothing displaces anything: a session can only replace or cancel its own.
+function records(state) {
+  return [state && state.armed, ...(state && Array.isArray(state.others) ? state.others : [])].filter(Boolean);
+}
+function armedFor(state, id) {
+  if (!id) return null;
+  return records(state).find((r) => r && r.id === id) || null;
+}
+function putRecord(state, record) {
+  if (!state.armed || state.armed.id === record.id) { state.armed = record; return; }
+  const rest = (Array.isArray(state.others) ? state.others : []).filter((r) => r.id !== record.id);
+  rest.push(record);
+  state.others = rest;
+}
+function dropRecord(state, id) {
+  const rest = Array.isArray(state.others) ? state.others.filter((r) => r.id !== id) : [];
+  if (state.armed && state.armed.id === id) state.armed = rest.shift() || null;
+  if (rest.length) state.others = rest;
+  else delete state.others;
+}
+
+/* ------------------------------------------------- what stops a resume ---- */
+
+// Claude Code asks two questions on a start nobody is there to answer at four
+// in the morning: whether to trust the folder, and whether bypass permissions
+// is really meant. Both answers live in .claude.json. The folder key is spelled
+// the way the CLI that wrote it spelled it - on the machine this was written
+// on, both C:/x and C:\x keys exist for the same folder - so every spelling
+// gets the answer. This is what stopped the relay on 2026-09-20: the window
+// opened, the trust question appeared, and the wake waited forever.
+function claudeJsonFile() {
+  if (process.env.CLAUDE_CONFIG_DIR) return path.join(process.env.CLAUDE_CONFIG_DIR, '.claude.json');
+  return path.join(os.homedir(), '.claude.json');
+}
+function projectKeys(cwd) {
+  const raw = String(cwd || '').replace(/[\\/]+$/, '');
+  if (!raw) return [];
+  const fwd = raw.replace(/\\/g, '/');
+  const back = raw.replace(/\//g, '\\');
+  return [...new Set(process.platform === 'win32' ? [raw, fwd, back] : [raw])];
+}
+function preflightPrompts(cwd, config, options) {
+  const file = claudeJsonFile();
+  let raw = null;
+  let parsed = {};
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+    parsed = JSON.parse(raw.replace(/^\uFEFF/, ''));
+  } catch (err) {
+    if (raw !== null) return { ok: false, file, error: file + ' is not readable JSON; left untouched', changes: [] };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { ok: false, file, error: file + ' is not an object; left untouched', changes: [] };
+  const changes = [];
+  if (!parsed.projects || typeof parsed.projects !== 'object' || Array.isArray(parsed.projects)) parsed.projects = {};
+  for (const key of projectKeys(cwd)) {
+    const entry = parsed.projects[key];
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      parsed.projects[key] = { allowedTools: [], hasTrustDialogAccepted: true };
+      changes.push('folder trust for ' + key);
+    } else if (entry.hasTrustDialogAccepted !== true) {
+      entry.hasTrustDialogAccepted = true;
+      changes.push('folder trust for ' + key);
+    }
+  }
+  if (config && config.permissionMode === 'bypassPermissions' && parsed.bypassPermissionsModeAccepted !== true) {
+    parsed.bypassPermissionsModeAccepted = true;
+    changes.push('bypass permissions accepted');
+  }
+  if (raw === null) changes.push('created ' + file);
+  if (!changes.length || (options && options.dry)) return { ok: true, file, changes, dry: Boolean(options && options.dry) };
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    if (raw !== null) fs.writeFileSync(file + '.bak-usage-limits', raw);
+    writeAtomic(file, JSON.stringify(parsed, null, 2) + '\n');
+  } catch (err) {
+    return { ok: false, file, error: err.message, changes: [] };
+  }
+  return { ok: true, file, changes, backup: raw !== null ? file + '.bak-usage-limits' : null };
 }
 
 // Written to a sibling and renamed into place. Two hooks can run at once, and a
@@ -362,8 +451,8 @@ function saveContinuation(id, text, options) {
   const body = String(text || '').slice(0, CONTINUATION_MAX).trim();
   if (!body) return null;
   const me = process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID || null;
-  const armedNow = read().armed;
-  if (armedNow && armedNow.id === id && me && me !== id && !(options && options.force)) {
+  const armedNow = armedFor(read(), id);
+  if (armedNow && me && me !== id && !(options && options.force)) {
     note('refused to overwrite the armed continuation of ' + id + ' from session ' + me + ' (pass force to do it on purpose)');
     return null;
   }
@@ -374,9 +463,10 @@ function saveContinuation(id, text, options) {
     return null;
   }
   const state = read();
-  if (state.armed && state.armed.id === id) {
-    state.armed.continuation = true;
-    state.armed.continuationAt = Date.now();
+  const mine = armedFor(state, id);
+  if (mine) {
+    mine.continuation = true;
+    mine.continuationAt = Date.now();
     write(state);
   }
   return planFile(id);
@@ -869,26 +959,28 @@ const LOST_UNSTARTED_MS = 12 * 60 * MINUTE + 30 * MINUTE;
 const LOST_RUNNING_MS = 3 * 60 * MINUTE + 10 * MINUTE;
 function reapLost(now) {
   const state = read();
-  const armed = state.armed;
-  if (!armed || !Number.isFinite(armed.wakeAt)) return false;
-  const limit = Number.isFinite(armed.wokeAt) ? armed.wokeAt + LOST_RUNNING_MS : armed.wakeAt + LOST_UNSTARTED_MS;
-  if (now < limit) return false;
-  const detail = Number.isFinite(armed.wokeAt)
-    ? 'the wake started ' + new Date(armed.wokeAt).toISOString() + ' and never reported back'
-    : 'the wake was due ' + new Date(armed.wakeAt).toISOString() + ' and never started, or died before it could say so';
-  state.history.push(Object.assign({}, armed, { endedAt: now, outcome: 'lost', detail }));
-  state.history = state.history.slice(-10);
-  state.armed = null;
-  write(state);
-  note('lost ' + armed.id + ': ' + detail, now);
-  if (armed.task) {
-    try {
-      cancelSchedule(armed.task);
-    } catch (err) {
-      // The expiry set at registration removes it either way.
+  let reaped = false;
+  for (const armed of records(state)) {
+    if (!Number.isFinite(armed.wakeAt)) continue;
+    const limit = Number.isFinite(armed.wokeAt) ? armed.wokeAt + LOST_RUNNING_MS : armed.wakeAt + LOST_UNSTARTED_MS;
+    if (now < limit) continue;
+    const detail = Number.isFinite(armed.wokeAt)
+      ? 'the wake started ' + new Date(armed.wokeAt).toISOString() + ' and never reported back'
+      : 'the wake was due ' + new Date(armed.wakeAt).toISOString() + ' and never started, or died before it could say so';
+    state.history.push(Object.assign({}, armed, { endedAt: now, outcome: 'lost', detail }));
+    state.history = state.history.slice(-10);
+    dropRecord(state, armed.id);
+    note('lost ' + armed.id + ': ' + detail, now);
+    if (armed.task) {
+      try {
+        cancelSchedule(armed.task);
+      } catch (err) {
+      }
     }
+    reaped = true;
   }
-  return true;
+  if (reaped) write(state);
+  return reaped;
 }
 
 function armable(input) {
@@ -946,7 +1038,14 @@ function arm(input) {
   // gone and the new one does not exist yet - and if registration then
   // fails, that window never closes: the user is left with no relay at all,
   // unattended, having had a working one a moment earlier.
-  const previousTask = state.armed && state.armed.task && state.armed.task !== name ? state.armed.task : null;
+  const existing = armedFor(state, id);
+  const previousTask = existing && existing.task && existing.task !== name ? existing.task : null;
+  let preflight = null;
+  if (config.mode === 'resume' && (!options.hostName || options.hostName === host.CLAUDE) && options.preflight !== false) {
+    preflight = preflightPrompts(options.cwd || process.cwd(), config);
+    if (preflight.ok && preflight.changes.length) note('pre-answered for ' + id + ': ' + preflight.changes.join(', '), now);
+    else if (!preflight.ok) note('could not pre-answer the start-up questions for ' + id + ': ' + preflight.error, now);
+  }
   // Re-arming the same session for the same reset would register the task
   // twice; -Force replaces it, and the record is rewritten either way.
   const argv = [path.join(__dirname, 'wake.js'), '--id', id];
@@ -988,6 +1087,7 @@ function arm(input) {
     mode: config.mode,
     how: scheduled.how,
     warning: scheduled.warning || null,
+    preflight: preflight ? preflight.changes : null,
     attempt: 0,
     continuation: false,
     // The outstanding items travel with the record, not just their count. They
@@ -1005,15 +1105,10 @@ function arm(input) {
   // Displacing somebody else's live relay is legitimate - one machine, one
   // relay - but it must not be silent. A wake still in the future belonged to
   // work that somebody expected to be picked up.
-  if (state.armed && state.armed.id !== id) {
-    if (Number.isFinite(state.armed.wakeAt) && state.armed.wakeAt > now) {
-      note('displacing the relay armed for ' + state.armed.id + ' (was due ' + new Date(state.armed.wakeAt).toISOString() + ')', now);
-    }
-    if (state.armed.task) cancelSchedule(state.armed.task);
-  }
-  state.armed = record;
+  const beside = records(state).filter((r) => r.id !== id).map((r) => r.id.slice(0, 8));
+  putRecord(state, record);
   write(state);
-  note('armed ' + id + ' for ' + new Date(when).toISOString() + ' via ' + scheduled.how, now);
+  note('armed ' + id + ' for ' + new Date(when).toISOString() + ' via ' + scheduled.how + (beside.length ? ' beside ' + beside.join(', ') : ''), now);
   return { ok: true, record };
 }
 
@@ -1032,24 +1127,26 @@ function arm(input) {
 // tidying up should say so.
 function disarm(reason, now, id) {
   const state = read();
-  if (!state.armed) return { ok: true, changed: false };
-  if (id && state.armed.id !== id) {
-    note('refused to disarm ' + state.armed.id + ' on behalf of ' + id, Number.isFinite(now) ? now : Date.now());
-    return { ok: true, changed: false, refused: true, armed: state.armed.id };
+  const all = records(state);
+  if (!all.length) return { ok: true, changed: false };
+  const targets = id ? all.filter((r) => r.id === id) : all;
+  if (!targets.length) {
+    note('nothing armed for ' + id + '; ' + all.map((r) => r.id.slice(0, 8)).join(', ') + ' left as they were', Number.isFinite(now) ? now : Date.now());
+    return { ok: true, changed: false, refused: true, armed: all[0].id };
   }
-  const record = state.armed;
-  if (record.task) cancelSchedule(record.task);
-  state.history.push(Object.assign({}, record, { endedAt: Number.isFinite(now) ? now : Date.now(), outcome: reason || 'cancelled' }));
+  for (const record of targets) {
+    if (record.task) cancelSchedule(record.task);
+    state.history.push(Object.assign({}, record, { endedAt: Number.isFinite(now) ? now : Date.now(), outcome: reason || 'cancelled' }));
+    dropRecord(state, record.id);
+    try {
+      fs.unlinkSync(planFile(record.id));
+    } catch (err) {
+    }
+    note('disarmed ' + record.id + ': ' + (reason || 'cancelled'), now);
+  }
   state.history = state.history.slice(-10);
-  state.armed = null;
   write(state);
-  try {
-    fs.unlinkSync(planFile(record.id));
-  } catch (err) {
-    // The continuation file may never have been written.
-  }
-  note('disarmed ' + record.id + ': ' + (reason || 'cancelled'), now);
-  return { ok: true, changed: true, record };
+  return { ok: true, changed: true, record: targets[0], records: targets };
 }
 
 function formatWait(ms) {
@@ -1071,16 +1168,18 @@ function status(now) {
     'Relay is ' + (config.enabled ? 'ON' : 'OFF') + ', arming at ' + config.at + ' per cent, waking ' +
       config.graceMinutes + ' min after the reset, delivery ' + config.mode + '.'
   );
-  if (state.armed) {
+  const all = records(state);
+  for (const armed of all) {
     lines.push(
-      'Armed: session ' + state.armed.id.slice(0, 8) + ' in ' + state.armed.cwd + ', wake in ' +
-        formatWait(state.armed.wakeAt - at) + ' (' + new Date(state.armed.wakeAt).toLocaleString() + '), via ' + state.armed.how + '.'
+      'Armed: session ' + armed.id.slice(0, 8) + ' in ' + armed.cwd + ', wake in ' +
+        formatWait(armed.wakeAt - at) + ' (' + new Date(armed.wakeAt).toLocaleString() + '), via ' + armed.how + '.'
     );
-    if (state.armed.warning) lines.push('  Caveat: ' + state.armed.warning + '.');
-    lines.push('  Continuation written: ' + (state.armed.continuation ? 'yes' : 'not yet'));
-  } else {
-    lines.push('Nothing armed.');
+    if (armed.warning) lines.push('  Caveat: ' + armed.warning + '.');
+    if (armed.preflight && armed.preflight.length) lines.push('  Pre-answered: ' + armed.preflight.join(', '));
+    lines.push('  Continuation written: ' + (armed.continuation ? 'yes' : 'not yet'));
   }
+  if (!all.length) lines.push('Nothing armed.');
+  else if (all.length > 1) lines.push(all.length + ' sessions armed; each wakes on its own task.');
   lines.push(
     'Available here: ' + [
       able.claude ? 'claude CLI' : null,
@@ -1163,6 +1262,7 @@ async function armByHand(rest) {
   return (
     'Armed by hand for session ' + sessionId.slice(0, 8) + ': wake at ' +
       new Date(result.record.wakeAt).toLocaleString() + ' via ' + result.record.how + '.' +
+      (result.record.preflight && result.record.preflight.length ? ' Pre-answered: ' + result.record.preflight.join(', ') + '.' : '') +
       (text ? ' Continuation saved.' : ' No continuation yet - add one with: relay note "<text>"')
   );
 }
@@ -1211,6 +1311,24 @@ async function doctor(now) {
   // Can a task actually be registered by this account? Registering and removing
   // a throwaway is the only honest answer; asking the policy is not.
   if (process.platform === 'win32') {
+    for (const rec of records(state)) {
+      const pre = preflightPrompts(rec.cwd, config, { dry: true });
+      const quiet = pre.ok && !pre.changes.length;
+      add('start-up questions for ' + String(rec.id).slice(0, 8), quiet,
+        pre.ok
+          ? (quiet ? 'folder trust and bypass permissions already answered in ' + pre.file : 'the resumed window would stop at: ' + pre.changes.join(', ') + ' - run relay preflight, or re-arm')
+          : pre.error,
+        quiet ? 'ok' : 'warn');
+    }
+    if (!records(state).length && config.mode === 'resume') {
+      const pre = preflightPrompts(process.cwd(), config, { dry: true });
+      const quiet = pre.ok && !pre.changes.length;
+      add('start-up questions here', quiet,
+        pre.ok
+          ? (quiet ? 'folder trust and bypass permissions already answered for ' + process.cwd() : 'a resume in ' + process.cwd() + ' would stop at: ' + pre.changes.join(', ') + ' - arming writes the answers')
+          : pre.error,
+        quiet ? 'ok' : 'warn');
+    }
     const probeName = 'usage-limits-doctor-probe';
     const registered = scheduleWindows(at + 6 * 60 * MINUTE, [path.join(__dirname, 'wake.js'), '--id', 'doctor-probe'], probeName, os.homedir(), at + 20000);
     add('scheduled tasks', registered.ok, registered.ok
@@ -1349,8 +1467,13 @@ function main(argv) {
     return written ? 'Continuation saved for the relay (' + written + ').' : 'Nothing to save.';
   }
   if (command === 'cancel') {
-    const result = disarm('cancelled by hand', Date.now());
-    return result.changed ? 'Relay cancelled and the scheduled wake removed.' : 'Nothing was armed.';
+    // This session's own relay by default; --all takes every session's down.
+    const me = process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID || null;
+    const every = rest.includes('--all') || !me || !armedFor(read(), me);
+    const result = disarm('cancelled by hand', Date.now(), every ? undefined : me);
+    if (!result.changed) return 'Nothing was armed.';
+    const n = result.records ? result.records.length : 1;
+    return n > 1 ? n + ' relays cancelled and their scheduled wakes removed.' : 'Relay cancelled and the scheduled wake removed.';
   }
   // Arming by hand, for the cases the hook cannot see: Codex writes no plan
   // tool into its rollouts, so nothing there ever reads as work to carry; and
@@ -1413,6 +1536,18 @@ function main(argv) {
     return 'A machine that cannot reach the API will retry ' + config.offlineAttempts + ' times, ' +
       config.offlineRetryMinutes + ' minutes apart at first and backing off from there. Being offline never counts as a failed run.';
   }
+  if (command === 'preflight') {
+
+    const target = process.argv.slice(3).find((a) => !String(a).startsWith('--')) || process.cwd();
+
+    const r = preflightPrompts(target, settings(read()));
+
+    if (!r.ok) return 'Could not pre-answer: ' + r.error;
+
+    return r.changes.length ? 'Pre-answered: ' + r.changes.join('; ') + '.' + (r.backup ? ' Backup: ' + r.backup : '') : 'Nothing to pre-answer for ' + target + ': folder trust and bypass permissions are already in ' + r.file + '.';
+
+  }
+
   if (command === 'doctor' || command === 'check') return doctor(Date.now()).then((r) => r.text);
   if (command === 'log') {
     if (rest.includes('--run')) {
@@ -1429,7 +1564,7 @@ function main(argv) {
   return [
     'usage: relay.js [status|on|off|at N|grace N|mode notify|resume|permission MODE|model NAME|',
     '                 thinking off|resume|always|armon threshold|completion|backstop N|',
-    '                 show on|off|onfailure rearm|stop|offline N|doctor|',
+    '                 show on|off|onfailure rearm|stop|offline N|doctor|preflight [cwd]|',
     '                 arm [--session ID] [TEXT]|note TEXT|cancel|log [--run]]',
     '',
     status(Date.now()),
@@ -1452,6 +1587,7 @@ if (require.main === module) {
 }
 
 module.exports = { workWithContinuation, reapLost, hiddenAction, BUGCHECK_LINE,
+  records, armedFor, putRecord, dropRecord, preflightPrompts, claudeJsonFile, projectKeys,
   DEFAULTS,
   MINUTE,
   main,

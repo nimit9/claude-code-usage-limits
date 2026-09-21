@@ -273,12 +273,15 @@ test('a malformed transcript line is skipped rather than fatal', () => {
   }
 });
 
-test('arming a second session replaces the first', () =>
+test('arming a second session keeps the first beside it', () =>
   withConfigDir(() => {
     relay.configure({ enabled: true });
     armed();
     armed({ sessionId: 'sess-9999' });
-    assert.strictEqual(relay.read().armed.id, 'sess-9999');
+    const ids = relay.records(relay.read()).map((r) => r.id);
+    assert.strictEqual(ids.length, 2, 'two sessions, two records, two wakes');
+    assert.ok(ids.includes('sess-9999'));
+    assert.notStrictEqual(relay.read().armed.id, 'sess-9999', 'the first stays primary');
   }));
 
 test('task names and PowerShell strings cannot carry anything through', () => {

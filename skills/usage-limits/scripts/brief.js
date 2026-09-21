@@ -1096,8 +1096,9 @@ function relayState(now, hookInput, binding, sessionId) {
     if (!config.enabled) return recent ? { enabled: false, last: recent } : null;
 
     // Already armed for this session: nothing to decide, just say so.
-    if (state.armed && state.armed.id === sessionId) {
-      return { enabled: true, armed: state.armed, config, last: recent };
+    const mine = relay.armedFor(state, sessionId);
+    if (mine) {
+      return { enabled: true, armed: mine, config, last: recent };
     }
     const work = relay.detectWork(hookInput && hookInput.transcript_path, {});
     const able = relay.armable({ config, binding, sessionId, work });
