@@ -181,3 +181,117 @@ test('readClaudeEvents finds the agents a Workflow runs, two directories down', 
     else process.env.CLAUDE_CONFIG_DIR = before;
   }
 });
+
+// One Fable 5.1 call at 1000 in / 100 out: (1000 * 10 + 100 * 50) / 1e6.
+const FABLE_CALL = 0.015;
+// The same call on Sonnet 5: (1000 * 2 + 100 * 10) / 1e6.
+const SONNET_CALL = 0.003;
+
+// A Sonnet research agent under a Fable session spends Sonnet money. Its
+// transcript names claude-sonnet-5 on every assistant record, and that is the
+// rate its tokens are priced at - never the session's. A record that names no
+// model at all is the one case priced at the session's model, read from the
+// parent transcript.
+test('a subagent transcript is priced at the model it names, and a nameless one at the session model', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-limits-submodel-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = dir;
+  usage.setHost('claude');
+  try {
+    fs.writeFileSync(
+      path.join(dir, '.claude.json'),
+      JSON.stringify({
+        oauthAccount: { organizationType: 'claude_max', userRateLimitTier: 'default_claude_max_5x' },
+        cachedUsageUtilization: {
+          fetchedAtMs: NOW - MINUTE,
+          utilization: {
+            five_hour: { utilization: 10, resets_at: new Date(NOW + 4 * HOUR).toISOString() },
+            seven_day: { utilization: 5, resets_at: new Date(NOW + 6 * DAY).toISOString() },
+          },
+        },
+      })
+    );
+    const project = path.join(dir, 'projects', 'C--proj');
+    fs.mkdirSync(path.join(project, SESSION, 'subagents'), { recursive: true });
+    const fable = (id, at, over) =>
+      line(id, at, Object.assign({
+        message: {
+          id: 'msg_' + id,
+          model: 'claude-fable-5-1',
+          usage: { input_tokens: 1000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 100 },
+        },
+      }, over || {}));
+    const main = [];
+    for (let i = 0; i < 6; i += 1) main.push(fable('m' + i, NOW - (30 - i) * MINUTE));
+    fs.writeFileSync(path.join(project, SESSION + '.jsonl'), main.join('\n') + '\n');
+
+    const sonnet = [];
+    for (let i = 0; i < 3; i += 1) {
+      sonnet.push(
+        line('s' + i, NOW - (20 - i) * MINUTE, {
+          isSidechain: true,
+          agentId: 'abc',
+          message: {
+            id: 'msg_s' + i,
+            model: 'claude-sonnet-5',
+            usage: { input_tokens: 1000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 100 },
+          },
+        })
+      );
+    }
+    fs.writeFileSync(path.join(project, SESSION, 'subagents', 'agent-abc.jsonl'), sonnet.join('\n') + '\n');
+    // A record with no model field at all, in a second agent.
+    const nameless = line('n1', NOW - 10 * MINUTE, {
+      isSidechain: true,
+      agentId: 'def',
+      message: {
+        id: 'msg_n1',
+        usage: { input_tokens: 1000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 100 },
+      },
+    });
+    fs.writeFileSync(path.join(project, SESSION, 'subagents', 'agent-def.jsonl'), nameless + '\n');
+
+    const data = await usage.report(NOW, { sessionId: SESSION });
+    const five = data.windows.find((w) => w.key === 'five_hour');
+    const expected = 6 * FABLE_CALL + 3 * SONNET_CALL + FABLE_CALL;
+    assert.ok(
+      Math.abs(five.spentUSD - expected) < 1e-9,
+      'six Fable turns, three Sonnet calls at Sonnet rates, one nameless call at the session rate: got ' + five.spentUSD
+    );
+    assert.ok(Math.abs(five.spentUSD - 10 * FABLE_CALL) > 1e-6, 'and not everything at the session rate');
+    assert.ok(Math.abs(data.session.cost - expected) < 1e-9);
+    const sonnetRow = data.models.find((row) => row.model === 'claude-sonnet-5');
+    assert.ok(sonnetRow, 'the Sonnet spend is attributed to Sonnet');
+    assert.ok(Math.abs(sonnetRow.cost - 3 * SONNET_CALL) < 1e-9);
+    const fableRow = data.models.find((row) => row.model === 'claude-fable-5-1');
+    assert.strictEqual(fableRow.turns, 7, 'the nameless call is counted as the session model');
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('eventFrom prices a nameless record at the fallback, and asks for it only then', () => {
+  const named = line('a', NOW, { isSidechain: true });
+  let asked = 0;
+  const fallback = () => {
+    asked += 1;
+    return 'claude-sonnet-5';
+  };
+  const event = usage.eventFrom(named, new Set(), 'proj', fallback);
+  assert.strictEqual(event.model, 'claude-opus-5', 'a named record keeps its own model');
+  assert.strictEqual(asked, 0, 'and the parent transcript is not read for it');
+
+  const nameless = line('b', NOW, {
+    isSidechain: true,
+    message: { id: 'msg_b', usage: { input_tokens: 1000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 100 } },
+  });
+  const assumed = usage.eventFrom(nameless, new Set(), 'proj', fallback);
+  assert.strictEqual(assumed.model, 'claude-sonnet-5');
+  assert.ok(Math.abs(assumed.cost - SONNET_CALL) < 1e-12);
+  assert.strictEqual(asked, 1);
+  // With nothing to fall back to, the record is priced as an unknown model, as before.
+  const unknown = usage.eventFrom(nameless, new Set(), 'proj', null);
+  assert.strictEqual(unknown.model, '');
+});

@@ -386,7 +386,14 @@ function tokenParts(usage) {
 }
 
 // One transcript line to an event, or null if it is not a billable turn.
-function eventFrom(line, seen, project) {
+//
+// Priced at the model the line itself names. A subagent's transcript names its
+// own model on every assistant record - a Sonnet agent under a Fable session
+// says claude-sonnet-5 - and that, not the session's model, is what its tokens
+// cost. `fallbackModel` is only for a record that names none: a string, or a
+// function called at most once so the parent transcript is read only when a
+// record actually needs it.
+function eventFrom(line, seen, project, fallbackModel) {
   if (line.indexOf('"assistant"') === -1 || line.indexOf('"usage"') === -1) return null;
   let entry;
   try {
@@ -442,15 +449,20 @@ function eventFrom(line, seen, project) {
   }
 
   const parts = tokenParts(entry.message.usage);
+  let model = typeof entry.message.model === 'string' ? entry.message.model : '';
+  if (!model && fallbackModel) {
+    const assumed = typeof fallbackModel === 'function' ? fallbackModel() : fallbackModel;
+    if (typeof assumed === 'string') model = assumed;
+  }
   return {
     at,
     // Carried on the event so the scan cache can dedup across files without
     // re-parsing them: a resumed or forked session repeats earlier turns, and
     // a cached file is never read again to find that out.
     dedupId: id === '|' ? null : id,
-    model: entry.message.model || '',
+    model,
     effort: entry.effort || null,
-    cost: costOf(entry.message.usage, entry.message.model),
+    cost: costOf(entry.message.usage, model),
     tokens: tokensOf(entry.message.usage),
     parts,
     // What the model was shown on this call: everything except what it wrote.
@@ -631,8 +643,11 @@ function claudeTranscriptFiles(since) {
         // A session's subagents write their transcripts under
         // <project>/<session id>/subagents/. Same budget, different file, and
         // for a long time an Explore or Plan agent's whole spend went unseen.
+        // The directory is named for the session, and the session's own
+        // transcript sits beside it: that is the model a subagent record
+        // falls back to when it names none of its own.
         for (const file of subagentTranscripts(path.join(full, entry.name, 'subagents'), since)) {
-          files.push({ file, project: dir.name });
+          files.push({ file, project: dir.name, parent: path.join(full, entry.name + '.jsonl') });
         }
         continue;
       }
@@ -725,7 +740,34 @@ function liveEffort(sessionId) {
 // slot on the machine - which on 2026-09-08 was a 19-hour-old Opus session,
 // shown over a Fable one.
 function liveModel(sessionId) {
-  const found = sessionTranscriptFile(sessionId);
+  return modelFromTail(sessionTranscriptFile(sessionId));
+}
+
+// The same answer for a transcript named by path rather than by session id.
+function transcriptModel(file) {
+  let stat;
+  try {
+    stat = fs.statSync(file);
+  } catch (err) {
+    return null;
+  }
+  return modelFromTail({ file, at: stat.mtimeMs, size: stat.size });
+}
+
+// The fallback a subagent record without a model is priced at: the parent
+// session's model, looked up once and only when asked for.
+function sessionModelReader(parentTranscript) {
+  let resolved;
+  return () => {
+    if (resolved === undefined) {
+      const seen = transcriptModel(parentTranscript);
+      resolved = seen && seen.model ? seen.model : null;
+    }
+    return resolved;
+  };
+}
+
+function modelFromTail(found) {
   if (!found) return null;
   const from = Math.max(0, found.size - EFFORT_TAIL_BYTES);
   const text = readSlice(found.file, from, found.size).toString('utf8');
@@ -933,13 +975,13 @@ function unpackEvent(row, project) {
 // the offset has to be a byte count: a transcript is full of characters that
 // are more than one byte, and counting them as one would drift the offset and
 // silently drop turns. A trailing partial line is left unconsumed.
-function parseSlice(buffer, project, baseOffset) {
+function parseSlice(buffer, project, baseOffset, fallbackModel) {
   const events = [];
   let start = 0;
   let consumed = 0;
   for (let i = 0; i < buffer.length; i += 1) {
     if (buffer[i] !== 0x0a) continue;
-    const event = eventFrom(buffer.toString('utf8', start, i), null, project);
+    const event = eventFrom(buffer.toString('utf8', start, i), null, project, fallbackModel);
     if (event) events.push(event);
     start = i + 1;
     consumed = start;
@@ -974,7 +1016,15 @@ function eventsForFile(entry, cache, keepFrom) {
   }
 
   const from = usable ? cached.offset : 0;
-  const parsed = parseSlice(readSlice(entry.file, from, stat.size), entry.project, from);
+  // A subagent record that names no model is priced at its session's model,
+  // read from the tail of the parent transcript - and read only if such a
+  // record turns up, which on 14,778 cached rows here it never has.
+  const parsed = parseSlice(
+    readSlice(entry.file, from, stat.size),
+    entry.project,
+    from,
+    entry.parent ? sessionModelReader(entry.parent) : null
+  );
   const rows = (usable ? cached.rows : [])
     .concat(parsed.events.map(packEvent))
     .filter((row) => row[1] >= keepFrom);
@@ -4180,6 +4230,8 @@ module.exports = {
   sessionTranscriptFile,
   liveEffort,
   liveModel,
+  transcriptModel,
+  sessionModelReader,
   EFFORT_TAIL_BYTES,
   scanFile,
   readScanCache,
