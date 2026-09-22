@@ -22,6 +22,12 @@ const HELP = `claude-usage-limits - how much agent usage is left, and whether th
   claude-usage-limits panel --open        open it in a split pane to the right
   claude-usage-limits panel --once        one frame, for a pipe or a screenshot
 
+  claude-usage-limits burn list           the backlog this repo and you keep
+  claude-usage-limits burn pick           what fits in budget about to expire
+  claude-usage-limits burn arm            wake shortly before the reset to spend it
+  claude-usage-limits burn cancel         call that wake off
+  claude-usage-limits burn status         what is armed, and where the backlog came from
+
   claude-usage-limits statusline status   is the status line installed
   claude-usage-limits statusline on       bars under the Claude Code prompt
   claude-usage-limits statusline off      put back what was there
@@ -83,6 +89,14 @@ function run(argv) {
   if (args[0] === 'codex-hook') {
     const installer = require('../skills/usage-limits/scripts/install-codex-hook.js');
     return Promise.resolve(installer.main(args.slice(1)));
+  }
+
+  if (args[0] === 'burn') {
+    const burn = require('../skills/usage-limits/scripts/burn.js');
+    return burn.main(args.slice(1), Date.now()).then((text) => {
+      process.stdout.write(text + '\n');
+      return 0;
+    });
   }
 
   if (args[0] === 'panel') {

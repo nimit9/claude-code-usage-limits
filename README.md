@@ -1036,6 +1036,46 @@ names the entry and the command that undoes it and leaves the file alone -
 which is the same rule as everywhere else, and the reason the byte-identical
 test can never go green by accident.
 
+## Surplus: spend it before it expires
+
+*A fork addition, not in the upstream plugin.*
+
+Everything above is about not starting work that cannot finish. The opposite
+waste is larger and completely invisible: turns left in a window at its reset
+are destroyed, not carried over, so an evening spent being careful with a budget
+that expires at nine has cost exactly as much as running out at eight.
+
+When the reset is near - inside ninety minutes by default - and the pace you are
+actually working at cannot spend what is left, the brief says so in one line:
+
+```
+About 47 turns of this window will expire unused in 40m; if there is a backlog,
+this is the time to spend them (run /usage-limits:burn).
+```
+
+Said at most once a quarter of an hour per session, never in `off`, shortened in
+`max`, and reported in `/usage` and `--json` as a `surplus` object.
+
+```
+claude-usage-limits burn list      the backlog, with each item's source and size
+claude-usage-limits burn pick      what fits in the turns about to expire
+claude-usage-limits burn arm       a one-shot wake 20 minutes before the reset
+claude-usage-limits burn cancel    call that wake off
+claude-usage-limits burn status    what is armed, and where the backlog came from
+```
+
+The backlog is `BACKLOG.md` in the repository you are in, then
+`~/.claude/backlog.md`, then open GitHub issues labelled `burn`. Ordinary
+markdown list items: `- [x]` is done and skipped, a trailing `~S`/`~M`/`~L`
+sizes the item at 8, 25 or 60 turns, and `@path` in a global item pins it to one
+repository.
+
+`burn` never invents work. `arm` refuses to schedule anything when the backlog
+is empty, and the prompt the wake delivers is only "run `burn pick` and do
+exactly what it prints", so an unattended run can do nothing that was not
+written down before it was booked. It uses the relay's existing scheduler and
+its existing permission setting rather than a bypass of its own.
+
 ## Working cheaply on purpose
 
 Half the problem is measurement. The other half is that a high effort setting
@@ -1170,7 +1210,8 @@ skills/usage-limits/scripts/      usage.js, brief.js, pulse.js, stop.js,
                                   recommend.js, panel.js, feed.js,
                                   statusline.js, live.js, view.js, bars.js,
                                   activity.js, reading.js, drift.js,
-                                  mode.js, voice.js, relay.js, wake.js
+                                  mode.js, voice.js, relay.js, wake.js,
+                                  defer.js, burn.js
 skills/usage-limits/references/   the longer notes
 hooks/hooks.json                  runs brief.js before each prompt, pulse.js
                                   during long turns, stop.js after each reply
@@ -1180,6 +1221,8 @@ commands/session.md               the /usage-limits:session command
 commands/panel.md                 the /usage-limits:panel command
 commands/statusline.md            the /usage-limits:statusline command
 commands/usage-mode.md            the /usage-mode command
+commands/defer.md                 the /usage-limits:defer command
+commands/burn.md                  the /usage-limits:burn command
 bin/cli.js                        the npx entry point
 tools/sync-version.js             keeps the manifest version in step
 vscode/                           the VS Code extension; build.js copies the

@@ -591,6 +591,38 @@ was not caution; it was quitting with a reason that sounded like one.
 Only when the switch is genuinely unavailable - no other window has room, or the
 user has ruled it out - does the checkpoint below apply.
 
+## Surplus and burn
+
+The mirror image of everything above, and the waste nobody sees. Turns left in
+a window at its reset are destroyed, not carried over. When the reset is near
+and the current pace cannot spend what is left, the brief says so:
+
+> About 47 turns of this window will expire unused in 40m; if there is a
+> backlog, this is the time to spend them (run /usage-limits:burn).
+
+It is said at most once every fifteen minutes per session, never in `off`, and
+in `max` it shortens to `47 turns expire unused in 40m; /usage-limits:burn.`
+The same reading is in `/usage` and in `--json` as a `surplus` object.
+
+`/usage-limits:burn` is the action, and it never invents work. The backlog is
+merged from three places, in this order and deduplicated by text:
+
+1. `BACKLOG.md` in the current repository
+2. `~/.claude/backlog.md`, or `$USAGE_LIMITS_BACKLOG`
+3. Open GitHub issues labelled `burn`, when `gh` is installed and the repository
+   is on GitHub
+
+Items are ordinary markdown list items. `- [x]` is done and is skipped, a
+trailing `~S`/`~M`/`~L` sizes the item in turns (8, 25, 60; `~M` is the
+default), and an `@path` in a global item means it belongs to that repository.
+
+`burn pick` selects what fits in the turns about to expire and prints the plan.
+`burn arm` books a one-shot wake shortly before the reset whose entire prompt is
+"run `burn pick` and do exactly what it prints" - and it refuses to schedule
+anything at all when the backlog is empty, so an unattended run can only ever do
+work that was written down beforehand. With budget expiring and no backlog,
+`pick` asks you to suggest a few candidates and to ask before starting any.
+
 ## 6. Checkpoint before the wall
 
 When the binding window is under roughly 10 percent, or under about ten turns
@@ -867,7 +899,8 @@ stop.
 | `scripts/install-codex-hook.js` | `status`, `on`, `off`. Installs the Codex-side instruction, which Claude Code does not need. |
 | `scripts/mode.js` | The budget mode: no arguments to report it, `max`/`high`/`standard`/`off` to set it, `auto`, `off --guard 95`, `--list`, `--explain <name>`, `--floor`/`--ceiling`/`--pin`, `--baseline`, `--advice`/`--no-advice`, `--history`, `undo`, `--ledger`. Reads settings.json and never writes it. |
 | `scripts/lowpower.js` | `status`, `on`, `off`. Restores what it replaced. Claude Code only. |
-| `scripts/recommend.js` | The chooser behind `usage.js --recommend`: posture, then the effort and model commands for each lever. Not meant to be called by hand. |
+| `scripts/recommend.js` | The chooser behind `usage.js --recommend`: posture, then the effort and model commands for each lever. Also the shared surplus reading - how much of this window the current pace cannot spend before the reset - used by the brief, the report and `burn.js`. Not meant to be called by hand. |
+| `scripts/burn.js` | `list`, `pick`, `arm`, `cancel`, `status`. Spends budget that would expire unused, from `BACKLOG.md`, `~/.claude/backlog.md` and GitHub issues labelled `burn`. Never invents work: an empty backlog arms nothing. A fork addition. |
 | `references/tactics.md` | Every lever that lowers cost, and why it works. |
 | `scripts/panel.js` | The live panel beside the chat: `--open` puts it in a split pane to the right, `--once` prints one frame, `--json` the fields. For the person, not for you; open it only when asked. |
 | `scripts/statusline.js` | `status`, `on`, `off`. Puts the bars under the prompt and restores what was there. |
