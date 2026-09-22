@@ -32,6 +32,91 @@ const TIGHT_TURNS = 25;
 
 const HOUR = 60 * 60 * 1000;
 
+// Use it or lose it.
+//
+// Budget left in a window at its reset is destroyed, not carried over, so a
+// window that resets before the current pace can spend it is not a budget at
+// all - it is a deadline. The arithmetic is one line and it was already here,
+// inside decide(), deciding the 'reset-first' posture and going no further.
+// The brief says the same thing to Claude and burn.js spends it, so it lives
+// in one place: three readers agreeing by construction rather than by three
+// copies of the same multiplication staying in step.
+//
+// The factor is the margin. Spendable has to be meaningfully under what is
+// left before "some of this will expire" is worth saying at all; at parity the
+// pace and the clock are the same answer and there is nothing to act on.
+const SURPLUS_FACTOR = 0.8;
+
+// How close the reset has to be before the brief says anything. Two days out,
+// a weekly window's surplus is a forecast and the pace that produced it will
+// have changed ten times over; ninety minutes out it is a fact about tonight.
+const SURPLUS_WITHIN_MINUTES = 90;
+
+// Below this the clause is noise. A handful of turns is not a backlog session,
+// and telling somebody to go and find work for six turns costs more attention
+// than the six turns are worth.
+const SURPLUS_MIN_TURNS = 10;
+
+// The raw reading: how many turns this pace can still spend before the reset,
+// and how many of the ones left over will simply expire. No thresholds - those
+// belong to whoever is asking - so decide() can use it for its posture while
+// the brief holds the answer to a stricter standard.
+//
+// Null rather than false when the question cannot be answered: a window with no
+// known reset, no pace to measure and no turn count is not "no surplus", it is
+// not known, and the two must not read the same to a caller.
+// Number(null) is 0 and Number('') is 0, so a missing turn count would read as
+// "nothing left" and a missing reset as "already reset" - both of them
+// confident answers to a question nobody can answer. Missing has to stay
+// missing all the way through.
+function figure(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function surplusOf(input) {
+  const options = input || {};
+  const binding = options.binding;
+  if (!binding || binding.stale) return null;
+  const msToReset = figure(binding.msToReset);
+  if (msToReset === null || msToReset <= 0) return null;
+  const turnsLeft = figure(options.turnsLeft);
+  if (turnsLeft === null) return null;
+  const pace = figure(options.turnsPerHour);
+  if (pace === null || pace <= 0) return null;
+
+  const spendableTurns = (msToReset / HOUR) * pace;
+  return {
+    surplus: spendableTurns < turnsLeft * SURPLUS_FACTOR,
+    spendableTurns,
+    expiringTurns: Math.max(0, turnsLeft - spendableTurns),
+    turnsLeft,
+    msToReset,
+  };
+}
+
+// The same reading, held to the standard the brief and burn.js speak at: the
+// reset has to be near and the waste has to be worth a sentence. Null when it
+// is not, so a caller can put it straight into a report field.
+function surplusClause(input) {
+  const options = input || {};
+  const base = surplusOf(options);
+  if (!base || !base.surplus) return null;
+  const withinMinutes = Number.isFinite(options.withinMinutes) ? options.withinMinutes : SURPLUS_WITHIN_MINUTES;
+  if (base.msToReset > withinMinutes * 60 * 1000) return null;
+  const minTurns = Number.isFinite(options.minTurns) ? options.minTurns : SURPLUS_MIN_TURNS;
+  if (base.expiringTurns < minTurns) return null;
+  return {
+    expiringTurns: Math.round(base.expiringTurns),
+    spendableTurns: Math.round(base.spendableTurns),
+    msToReset: base.msToReset,
+    // Filled in by whoever knows whether the sentence has already been said;
+    // the arithmetic has no opinion about that.
+    saidAt: Number.isFinite(options.saidAt) ? options.saidAt : null,
+  };
+}
+
 // Where the mechanical bulk should go when it is delegated.
 //
 // The ladder below is an assumption: one tier down from whatever is doing the
@@ -128,14 +213,13 @@ function decide(inputs) {
 
   // When the clock wins the race, the limit is not the constraint and there
   // is nothing to buy by economising: whatever is left at the reset is lost.
-  const pace = inputs.recentTurnsPerHour;
-  if (
-    Number.isFinite(binding.msToReset) &&
-    binding.msToReset > 0 &&
-    Number.isFinite(pace) &&
-    pace > 0 &&
-    (binding.msToReset / HOUR) * pace < turnsLeft * 0.8
-  ) {
+  // The same reading the brief prints and burn.js spends, from the same helper.
+  const reading = surplusOf({
+    binding,
+    turnsLeft,
+    turnsPerHour: inputs.recentTurnsPerHour,
+  });
+  if (reading && reading.surplus) {
     base.posture = 'reset-first';
     base.reason = 'the window resets before this pace can spend it';
     base.effort.why = 'the budget is not the constraint';
@@ -346,6 +430,11 @@ function renderRecommend(data, turns) {
 
 module.exports = {
   decide,
+  surplusOf,
+  surplusClause,
+  SURPLUS_FACTOR,
+  SURPLUS_WITHIN_MINUTES,
+  SURPLUS_MIN_TURNS,
   fromReport,
   familyName,
   ladderModel,

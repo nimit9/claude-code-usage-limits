@@ -3336,6 +3336,12 @@ async function report(now, options) {
       tokens: recent.tokens,
       effort: dominantEffort(recentEvents),
     },
+    // Budget that will be destroyed at the reset rather than spent, when there
+    // is any: the same use-it-or-lose-it reading the brief prints and burn.js
+    // spends, from the same helper so the three can never disagree. Null when
+    // the window resets too far out, too little would go to waste, or the pace
+    // cannot be measured at all.
+    surplus: surplusReading(binding, recent.turns, options && options.sessionId),
     measuredTurns: mainThread(events).length,
     subagentTurns: events.length - mainThread(events).length,
     // The effort the NEXT turn will run at, and what a turn has cost at each
@@ -3350,6 +3356,32 @@ async function report(now, options) {
     // that warns on the number says "at least" when this is set.
     scanPartial,
   });
+}
+
+// The surplus reading, plus when the brief last said it out loud.
+//
+// Both requires are lazy. recommend.js is pure arithmetic and cheap; brief.js
+// is the hook and pulls in half the plugin, and it requires this module at its
+// own top level - asking for it from here at load time would be a cycle. By
+// the time a report is being built, either it is already loaded or loading it
+// is a few milliseconds against a transcript scan.
+function surplusReading(binding, turnsPerHour, sessionId) {
+  try {
+    let saidAt = null;
+    try {
+      saidAt = require('./brief.js').surplusSaidAt(sessionId);
+    } catch (err) {
+      // No memo is not an error; it means nobody has said it yet.
+    }
+    return require('./recommend.js').surplusClause({
+      binding,
+      turnsLeft: binding ? binding.turnsLeft : null,
+      turnsPerHour,
+      saidAt,
+    });
+  } catch (err) {
+    return null;
+  }
 }
 
 function verdictLine(window) {
@@ -3774,6 +3806,17 @@ function render(data) {
     );
   } else {
     lines.push('  Recent pace   no turns in the last hour');
+  }
+  // More budget than time. Printed right under the pace because it is the pace
+  // that produces it: the turns are there, the hours are not, and what is left
+  // at the reset is destroyed rather than carried over.
+  if (data.surplus) {
+    lines.push(
+      '  Surplus       about ' + formatCount(data.surplus.expiringTurns) + ' turns will expire unused in ' +
+        formatDuration(data.surplus.msToReset) + ' (this pace can spend about ' +
+        formatCount(data.surplus.spendableTurns) + ')'
+    );
+    lines.push('                /usage-limits:burn picks what fits, from BACKLOG.md or ~/.claude/backlog.md');
   }
   lines.push(
     '  Measured      ' + formatCount(data.measuredTurns) + ' turns of local transcript' +

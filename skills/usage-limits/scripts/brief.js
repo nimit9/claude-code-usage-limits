@@ -23,6 +23,7 @@ const reading = require('./reading.js');
 const voice = require('./voice.js');
 const mode = require('./mode.js');
 const feed = require('./feed.js');
+const recommend = require('./recommend.js');
 
 const SECOND = 1000;
 const DAY = 24 * 60 * 60 * 1000;
@@ -59,6 +60,13 @@ const DEFAULTS = {
   runwayMinutes: 10,
   // How old the reading may be before the hook takes a fresh one.
   refreshSeconds: 180,
+  // How near the reset has to be before the surplus clause fires, and how many
+  // turns have to be going to waste for it to be worth a sentence. See
+  // recommend.surplusClause: this is the same use-it-or-lose-it reading the
+  // 'reset-first' posture is built on, held to a stricter standard because it
+  // ends in an instruction rather than a posture.
+  surplusWithinMinutes: recommend.SURPLUS_WITHIN_MINUTES,
+  surplusMinTurns: recommend.SURPLUS_MIN_TURNS,
 };
 
 // A hook has ten seconds; the reading gets four of them at most.
@@ -217,6 +225,38 @@ function standingShortFor(sessionId, now, env) {
   return standingSaid(sessionId, now);
 }
 
+// The surplus clause, at most once a quarter of an hour per session.
+//
+// It is a standing fact rather than news: once the reset is inside the window
+// the clause watches, every prompt until the reset would carry it, and a
+// sentence repeated forty times is the plugin nagging about the one thing it
+// is otherwise careful never to nag about. Fifteen minutes is short enough
+// that a session that starts mid-window still hears it in time to act, and
+// long enough that hearing it is a reminder rather than a refrain.
+const SURPLUS_REPEAT_MS = 15 * 60 * 1000;
+function surplusKey(sessionId) {
+  return String(sessionId || '_') + '#surplus';
+}
+function surplusSaidAt(sessionId) {
+  const entry = readSaid()[surplusKey(sessionId)];
+  return entry && Number.isFinite(entry.at) ? entry.at : null;
+}
+// Read-only on purpose. The decision to say it is taken well before the line
+// is known to be going out at all - the unchanged-digest check can still
+// swallow the whole brief - so marking it here would spend the fifteen minutes
+// on a sentence nobody read.
+function surplusSayable(sessionId, now) {
+  const last = surplusSaidAt(sessionId);
+  const at = Number.isFinite(now) ? now : Date.now();
+  return !Number.isFinite(last) || at - last >= SURPLUS_REPEAT_MS;
+}
+function markSurplus(sessionId, now) {
+  const at = Number.isFinite(now) ? now : Date.now();
+  const all = readSaid();
+  all[surplusKey(sessionId)] = { at };
+  writeSaid(all, at);
+}
+
 // The prompt right after a cache miss the user can do something about.
 //
 // The status line JSON carries prompt_cache.last_miss_at (epoch seconds) and
@@ -365,6 +405,8 @@ function settings() {
     fewTurns: number(env.USAGE_LIMITS_FEW_TURNS, DEFAULTS.fewTurns),
     runwayMinutes: number(env.USAGE_LIMITS_RUNWAY, DEFAULTS.runwayMinutes),
     refreshSeconds: number(env.USAGE_LIMITS_REFRESH, DEFAULTS.refreshSeconds),
+    surplusWithinMinutes: number(env.USAGE_LIMITS_SURPLUS_WITHIN, DEFAULTS.surplusWithinMinutes),
+    surplusMinTurns: number(env.USAGE_LIMITS_SURPLUS_MIN_TURNS, DEFAULTS.surplusMinTurns),
   };
 }
 
@@ -599,6 +641,11 @@ function summariseOthers(windows, bindingKey) {
 // set, NOTHING the plugin says may point below opus/high. Filtering here means
 // a new suggestion path cannot quietly bypass the bound by being added
 // somewhere else, which is exactly how a rule like this rots.
+// The surplus clause is deliberately not filtered here. A bound is a statement
+// about which model and which effort the plugin may point at, and the surplus
+// sentence points at neither: it says budget is about to expire and names a
+// command that lists work. Pinning governs self-switching, not spending, and a
+// user who has pinned their tier still loses the same turns at the reset.
 function applyBounds(parts, bounds) {
   if (!bounds || (!bounds.floor && !bounds.ceiling && !bounds.pin)) return parts;
   const next = Object.assign({}, parts);
@@ -641,6 +688,14 @@ function applyBounds(parts, bounds) {
     next.familySwitch = !bounds.pin && !noRoomBelow;
   }
   return next;
+}
+
+// The same reset time the rest of the line quotes. The surplus reading carries
+// its own milliseconds so the clause can still be built from a reading alone,
+// but where the line already says "resets in 40m" the two must not disagree by
+// a rounding.
+function surplusIn(parts) {
+  return parts.resetsIn || usage.formatDuration(parts.surplus.msToReset);
 }
 
 function briefText(input) {
@@ -879,6 +934,28 @@ function briefText(input) {
           'changing it. What IS yours is the model on anything you spawn: size that to the stage.'
     );
   }
+  // Use it or lose it, said only while the reset is near enough for it to be a
+  // plan rather than a forecast.
+  //
+  // This is the mirror image of every other sentence in this line, and it is
+  // the one the plugin was missing. The rest of the brief exists so that work
+  // is not started that cannot finish; this exists because the opposite waste
+  // is real and invisible. Turns left in a window at its reset are destroyed,
+  // and a session that spends its last hour being careful with a budget that
+  // expires at nine has thrown away exactly as much as one that ran out at
+  // eight - it just has nothing to show for it.
+  //
+  // It never says what the work should be. It says how much room there is and
+  // where the list lives; whether there is anything on that list is a question
+  // about the user's repository, not about the meter.
+  const surplusSentence = parts.surplus
+    ? style === 'terse'
+      ? count(parts.surplus.expiringTurns, 'turn') + ' expire unused in ' + surplusIn(parts) + '; /usage-limits:burn.'
+      : 'About ' + count(parts.surplus.expiringTurns, 'turn') + ' of this window will expire unused in ' +
+        surplusIn(parts) + '; if there is a backlog, this is the time to spend them (run /usage-limits:burn).'
+    : null;
+  if (surplusSentence && style !== 'terse') sentences.push(surplusSentence);
+
   if (parts.othersSummary) sentences.push('Other windows: ' + parts.othersSummary + '.');
 
   // Being at the wall and being out of budget are different things, and the
@@ -1199,6 +1276,10 @@ function briefText(input) {
     const adviceText = parts.adviceText ? ' ' + parts.adviceText : '';
     return (
       sentences[0] + caveat + (parts.tier ? ' ' + parts.tier : '') + (bounded ? ' ' + bounded : '') + adviceText +
+      // Kept in the terse style, in its short form. Dropping it would be the
+      // mode saving eleven words out of the one clause that says there is more
+      // budget than time - which is the cheapest thing in the line to act on.
+      (surplusSentence ? ' ' + surplusSentence : '') +
       (escapeSentence ? ' ' + escapeSentence : '') +
       (parts.pressure !== 'roomy' && relaySentences.length ? ' ' + relaySentences.join(' ') : '') +
       '\n' + instruction + directive
@@ -1517,6 +1598,11 @@ async function run(now, hookInput) {
       snapshotAge: usage.formatDuration(data.snapshotAgeMs),
       snapshotAgeMs: Number.isFinite(data.snapshotAgeMs) ? data.snapshotAgeMs : null,
       binding: cacheableBinding(binding),
+      // The pace the surplus reading is measured against. Cached with the rest
+      // of the view because it comes from the same pass, and because a pace
+      // re-derived on the cheap path would disagree with the turn count beside
+      // it - which is exactly the mistake the one-pass rule above exists for.
+      recentTurnsPerHour: data.recent ? data.recent.turns : null,
       effortWarning: data.effortWarning || null,
       // From the per-effort TABLE, which is what report() returns. It was
       // being asked for from `data.events`, a field report() has never had -
@@ -1583,6 +1669,18 @@ async function run(now, hookInput) {
   if (offering) mode.adviceOffer(advice.id, sessionId, now);
 
   const pressureNow = pressure(binding, now, config, Number.isFinite(yourTurnsLeft) ? yourTurnsLeft : view.turnsLeft);
+  // Budget that will expire unspent, measured against this session's own share
+  // of it: on a shared budget the turns somebody else is going to spend are
+  // not turns going to waste.
+  const surplus = recommend.surplusClause({
+    binding,
+    turnsLeft: Number.isFinite(yourTurnsLeft) ? yourTurnsLeft : view.turnsLeft,
+    turnsPerHour: view.recentTurnsPerHour,
+    withinMinutes: config.surplusWithinMinutes,
+    minTurns: config.surplusMinTurns,
+    saidAt: surplusSaidAt(sessionId),
+  });
+  const sayingSurplus = Boolean(surplus) && surplusSayable(sessionId, now);
   // Fast mode changes what the window's figures mean, so a toggle is a change
   // worth saying even when nothing else has moved.
   const fastMode = fastModeFor(sessionId);
@@ -1603,6 +1701,10 @@ async function run(now, hookInput) {
     carry && carry.armed ? 'relay' : '-',
     offering ? 'advice' : '-',
     fastMode ? 'fast' : '-',
+    // A window that has just tipped into surplus has moved, whatever the
+    // percentage says. Without this in the digest, `max` would swallow the
+    // one prompt on which the clause had something new to tell anybody.
+    sayingSurplus ? 'surplus' : '-',
   ].join('|');
   if (!budget.policy.briefWhenUnchanged && pressureNow === 'roomy') {
     const slots = readCache();
@@ -1668,6 +1770,9 @@ async function run(now, hookInput) {
     snapshotAge: view.snapshotAge,
     snapshotStale: Number.isFinite(view.snapshotAgeMs) && view.snapshotAgeMs >= SNAPSHOT_TRUST_MS,
     fastMode,
+    // Only when it is this session's turn to hear it; the reading itself is
+    // still in the report and the JSON either way.
+    surplus: sayingSurplus ? surplus : null,
     // The turn count that matters for this session is its share of a shared
     // budget, not the whole window's. Escalating on the whole window meant a
     // count that looked comfortable while the part actually available here was
@@ -1677,6 +1782,10 @@ async function run(now, hookInput) {
   // Only the roomy form carries the three standing strings; the terse style
   // drops them and the tight and gone instructions are their own words.
   if (text && !standingShort && !terse && pressureNow !== 'tight' && pressureNow !== 'gone') markStanding(sessionId, now);
+  // Marked only once the sentence is really in a line that is really going
+  // out: `off` returns before this, and the digest check above can still have
+  // swallowed the whole brief.
+  if (text && sayingSurplus) markSurplus(sessionId, now);
   return text;
 }
 
@@ -1724,6 +1833,7 @@ function withBugcheck(text) {
 
 module.exports = { withBugcheck, sayOnce, shapeOf, saidFile, REPEAT_MS, staleVersionFor, installedVersion, runningVersion,
   readSaid, standingSaid, markStanding, standingShortFor, STANDING_SHORT, cacheMissWhyFor, missReason, MISS_RECENT_MS,
+  surplusSaidAt, surplusSayable, markSurplus, SURPLUS_REPEAT_MS,
   DEFAULTS,
   aheadOfPace,
   pacingMatters,
