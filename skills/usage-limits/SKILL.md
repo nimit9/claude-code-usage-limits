@@ -616,12 +616,27 @@ Items are ordinary markdown list items. `- [x]` is done and is skipped, a
 trailing `~S`/`~M`/`~L` sizes the item in turns (8, 25, 60; `~M` is the
 default), and an `@path` in a global item means it belongs to that repository.
 
+`burn add "<thing>"` is how something gets onto that list without anyone
+editing a file: this repository by default, `~/.claude/backlog.md` with
+`--global`, the same file tagged `@name` with `--repo <name>`. It checks all
+three sources and says where an item already is rather than writing it twice.
+
 `burn pick` selects what fits in the turns about to expire and prints the plan.
+`burn done "<thing>"` (or the number `pick` printed, or `--all`) closes the
+loop: it ticks the line wherever it lives and closes the GitHub issue when the
+item was one. It refuses to tick anything when `HEAD` has not moved and
+`git status --porcelain` is unchanged since `pick` printed the plan - a run that
+did nothing must not be able to mark the work complete - and `--force`
+overrides that out loud.
+
 `burn arm` books a one-shot wake shortly before the reset whose entire prompt is
-"run `burn pick` and do exactly what it prints" - and it refuses to schedule
-anything at all when the backlog is empty, so an unattended run can only ever do
-work that was written down beforehand. With budget expiring and no backlog,
-`pick` asks you to suggest a few candidates and to ask before starting any.
+"run `burn pick --unattended` and do exactly what it prints" - and it refuses to
+schedule anything at all when the backlog is empty, so an unattended run can
+only ever do work that was written down beforehand. `--unattended` refuses a
+dirty working tree or a directory that is not a repository, and puts the work on
+a `burn/<date>-<n>` branch that `done` commits to and never pushes. With budget
+expiring and no backlog, an attended `pick` asks you to suggest a few candidates
+and to ask before starting any; an unattended one stops.
 
 ## 6. Checkpoint before the wall
 

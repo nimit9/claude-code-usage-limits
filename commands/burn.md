@@ -12,8 +12,9 @@ Then do what it prints, and nothing else.
 
 - **A plan** - the numbered list with a budget above it. Do those items, in
   order, starting now. Stop when the window resets or the list ends, whichever
-  comes first, and mark each one done in its `BACKLOG.md` line (`- [x]`) as you
-  finish it.
+  comes first, and run `burn done <n>` as you finish each one - that ticks the
+  line, closes the issue if it was one, and commits when the run is on a branch
+  of its own.
 - **"No surplus right now"** - say that in one line and stop. Do not go looking
   for something to do instead.
 - **"Suggest 3-5 candidates"** - there is budget about to expire and no backlog
@@ -28,8 +29,21 @@ that the work it picks was decided in advance, by the user, in a file.
 ## The other forms
 
 - `list` - the merged backlog with each item's source and size
+- `add "<thing>" [--size S|M|L] [--global | --repo <name>]` - write one line
+  down. No flag means this repository's `BACKLOG.md`, `--global` means
+  `~/.claude/backlog.md`, `--repo` means the same file tagged for that
+  repository. It refuses to write a duplicate and says where the item already
+  is, so there is never any reason to open the file yourself.
+- `done "<thing>" | <n> | --all [--force]` - tick the item off wherever it
+  lives, and close its GitHub issue if it was one. It refuses when nothing has
+  changed since `pick` printed the plan; `--force` overrides that.
+- `pick --unattended` - the form the scheduled wake uses. It refuses a dirty
+  working tree or a directory that is not a repository, and works on a
+  `burn/<date>-<n>` branch that `done` commits to and never pushes. Do not use
+  it by hand.
 - `arm [--before 20] [--min-turns 10]` - book a one-shot wake that many minutes
-  before the window resets, which will run `pick` and do exactly what it prints
+  before the window resets, which will run `pick --unattended` and do exactly
+  what it prints
 - `cancel` - call that wake off
 - `status` - what is armed, and which backlog sources were found
 

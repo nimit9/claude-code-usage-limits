@@ -1058,7 +1058,9 @@ Said at most once a quarter of an hour per session, never in `off`, shortened in
 
 ```
 claude-usage-limits burn list      the backlog, with each item's source and size
+claude-usage-limits burn add "..." write one line down, in the right file
 claude-usage-limits burn pick      what fits in the turns about to expire
+claude-usage-limits burn done "..."  tick it off, close its issue, commit it
 claude-usage-limits burn arm       a one-shot wake 20 minutes before the reset
 claude-usage-limits burn cancel    call that wake off
 claude-usage-limits burn status    what is armed, and where the backlog came from
@@ -1070,11 +1072,32 @@ markdown list items: `- [x]` is done and skipped, a trailing `~S`/`~M`/`~L`
 sizes the item at 8, 25 or 60 turns, and `@path` in a global item pins it to one
 repository.
 
+`burn add` picks the file so nothing else has to: this repository by default,
+`~/.claude/backlog.md` with `--global`, the same file tagged `@name` with
+`--repo <name>`. It checks all three sources first and prints where the item
+already is rather than writing it twice. `burn done` is the other end: it ticks
+the line, and when the item was a labelled issue it closes the issue too, which
+is what stops the same issue being picked every night forever.
+
+`burn done` refuses to tick anything off when nothing has changed - same `HEAD`,
+same `git status --porcelain` - since `pick` printed the plan, because the
+expensive failure is a run that did nothing and marked the work complete
+anyway. `--force` overrides it and says so; outside a repository there is
+nothing to compare and it ticks on trust.
+
 `burn` never invents work. `arm` refuses to schedule anything when the backlog
-is empty, and the prompt the wake delivers is only "run `burn pick` and do
-exactly what it prints", so an unattended run can do nothing that was not
-written down before it was booked. It uses the relay's existing scheduler and
-its existing permission setting rather than a bypass of its own.
+is empty, and the prompt the wake delivers is only "run `burn pick
+--unattended` and do exactly what it prints", so an unattended run can do
+nothing that was not written down before it was booked. `--unattended` also
+refuses a dirty working tree outright and does its work on a `burn/<date>-<n>`
+branch cut from where you were, committed by `burn done` and never pushed, so
+the morning after is a branch to read rather than a diff to untangle. It uses
+the relay's existing scheduler and its existing permission setting rather than
+a bypass of its own.
+
+The `backlog` skill in `skills/backlog/` is the same thing from the other
+direction: install it in `~/.claude/skills/` and "note that for later" becomes a
+`burn add` rather than a sentence that scrolls away.
 
 ## Working cheaply on purpose
 
@@ -1213,6 +1236,8 @@ skills/usage-limits/scripts/      usage.js, brief.js, pulse.js, stop.js,
                                   mode.js, voice.js, relay.js, wake.js,
                                   defer.js, burn.js
 skills/usage-limits/references/   the longer notes
+skills/backlog/SKILL.md           "note that for later" -> burn add; symlink or
+                                  copy it into ~/.claude/skills/backlog/
 hooks/hooks.json                  runs brief.js before each prompt, pulse.js
                                   during long turns, stop.js after each reply
                                   and sessionend.js when the session closes
