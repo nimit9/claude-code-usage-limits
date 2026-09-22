@@ -11,7 +11,9 @@
 // to show for it.
 //
 //   node burn.js list      what is on the backlog, and where it came from
+//   node burn.js add       write one line to the right backlog file
 //   node burn.js pick      what fits in the budget that is about to expire
+//   node burn.js done      tick an item off, close its issue, commit the work
 //   node burn.js arm       book a wake shortly before the reset
 //   node burn.js cancel    call that wake off
 //   node burn.js status    what is armed and what the sources are
@@ -19,9 +21,15 @@
 // The rule that makes this safe to leave armed overnight: it never invents
 // work. The backlog is a file the user wrote, or issues they labelled, and an
 // empty backlog is a refusal to schedule anything rather than an invitation to
-// go and find something. The wake prompt says "run pick and do exactly what it
-// prints", so an unattended run can only ever do what was already written down
-// before anybody went to bed.
+// go and find something. The wake prompt says "run pick --unattended and do
+// exactly what it prints", so an unattended run can only ever do what was
+// already written down before anybody went to bed - on a branch of its own,
+// from a clean tree, or not at all.
+//
+// Everything a person might otherwise be asked to remember is a decision this
+// file makes instead: which file a new item belongs in, whether it is already
+// written down somewhere, whether any work actually happened before an item is
+// ticked off, and where an unattended run is allowed to write.
 
 const fs = require('fs');
 const os = require('os');
@@ -56,6 +64,14 @@ const DEFAULT_MIN_TURNS = 10;
 // make this command feel broken.
 const GH_TIMEOUT_MS = 5000;
 const GH_LIMIT = 20;
+const GIT_TIMEOUT_MS = 5000;
+
+// Committing can be slower than asking a question, because hooks run on it.
+const GIT_COMMIT_TIMEOUT_MS = 30000;
+
+// What the issue is told when an unattended run finishes it. Whoever reads the
+// issue next needs to know a machine closed it, and why.
+const GH_CLOSE_COMMENT = 'Done by an unattended burn run (/usage-limits:burn).';
 
 /* ------------------------------------------------------------- where ------ */
 
@@ -103,6 +119,62 @@ function gitRoot(cwd) {
     // No git, or no repository. The working directory is the answer.
   }
   return cwd || process.cwd();
+}
+
+function git(args, root, timeout) {
+  try {
+    return spawnSync('git', args, {
+      cwd: root,
+      encoding: 'utf8',
+      timeout: timeout || GIT_TIMEOUT_MS,
+    });
+  } catch (err) {
+    return { status: 1, stdout: '', stderr: err && err.message ? err.message : String(err) };
+  }
+}
+
+function isGitRepo(root) {
+  const run = git(['rev-parse', '--is-inside-work-tree'], root);
+  return run.status === 0 && /true/.test(run.stdout || '');
+}
+
+function gitHead(root) {
+  const run = git(['rev-parse', 'HEAD'], root);
+  const out = (run.stdout || '').trim();
+  return run.status === 0 && out ? out : null;
+}
+
+// The whole working tree and index state as one string, rather than the
+// boolean "is it dirty". A boolean cannot tell one dirty tree from another, so
+// it cannot answer the question `done` actually asks - did anything happen
+// since the plan was printed - for a run that started dirty.
+function gitStatus(root) {
+  const run = git(['status', '--porcelain'], root);
+  if (run.status !== 0) return null;
+  return String(run.stdout || '').replace(/\s+$/, '');
+}
+
+function gitBranch(root) {
+  const run = git(['rev-parse', '--abbrev-ref', 'HEAD'], root);
+  const out = (run.stdout || '').trim();
+  return run.status === 0 && out ? out : null;
+}
+
+function shortSha(sha) {
+  return sha ? String(sha).slice(0, 7) : '(no commits yet)';
+}
+
+// A branch per unattended run, dated so a week of them reads as a history and
+// numbered so two in one night cannot collide.
+function branchName(root, now) {
+  const at = new Date(Number.isFinite(now) ? now : Date.now());
+  const day =
+    at.getFullYear() + '-' + String(at.getMonth() + 1).padStart(2, '0') + '-' + String(at.getDate()).padStart(2, '0');
+  for (let n = 1; n < 100; n += 1) {
+    const name = 'burn/' + day + '-' + n;
+    if (git(['rev-parse', '--verify', '--quiet', 'refs/heads/' + name], root).status !== 0) return name;
+  }
+  return 'burn/' + day + '-' + Date.now().toString(36);
 }
 
 /* ------------------------------------------------------------ reading ----- */
@@ -167,6 +239,45 @@ function taggedForRepo(tag, root) {
   } catch (err) {
     return false;
   }
+}
+
+// One item is the same item as another when a person would say so. Case and
+// spacing are the only differences worth forgiving: anything cleverer would
+// start silently refusing to add lines somebody meant to add.
+function key(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Every item written down anywhere, unfiltered by which repository it is
+// tagged for. `collect` is what `pick` spends and so is narrowed to here;
+// `add` and `done` need the wider view - an item tagged `@kosha` is still a
+// duplicate when you are standing in another directory.
+function everywhere(root, turnsFor, options) {
+  const opts = options || {};
+  const found = [];
+  const repoFile = path.join(root, 'BACKLOG.md');
+  const repoText = readFile(repoFile);
+  if (repoText !== null) found.push(...parseBacklog(repoText, repoFile, turnsFor));
+  const globalFile = globalBacklogFile();
+  const globalText = readFile(globalFile);
+  if (globalText !== null) found.push(...parseBacklog(globalText, globalFile, turnsFor));
+  if (opts.gh !== false) found.push(...ghIssues(root, turnsFor));
+  return found;
+}
+
+// `- Fix auth redirect @kosha` and `- Fix auth redirect` are one item written
+// twice, so the tag comes off before the comparison as well as staying on.
+function findExisting(items, text) {
+  const wanted = key(text);
+  if (!wanted) return null;
+  for (const item of items || []) {
+    if (key(item.text) === wanted) return item;
+    if (key(String(item.text).replace(REPO_TAG, '')) === wanted) return item;
+  }
+  return null;
 }
 
 function onPath(command) {
@@ -258,9 +369,9 @@ function collect(options) {
   const seen = new Set();
   const items = [];
   for (const item of found) {
-    const key = item.text.toLowerCase().replace(/\s+/g, ' ');
-    if (seen.has(key)) continue;
-    seen.add(key);
+    const id = key(item.text);
+    if (seen.has(id)) continue;
+    seen.add(id);
     items.push(item);
   }
   return {
@@ -272,6 +383,147 @@ function collect(options) {
       items.some((item) => item.source === 'gh') ? 'gh issue list --label burn' : null,
     ].filter(Boolean),
   };
+}
+
+/* ------------------------------------------------------------ writing ----- */
+
+// Appended, never rewritten, and in whatever newline style the file already
+// uses. A backlog is somebody's own file; a command that reformats it once is
+// a command they stop pointing at their real one.
+function appendLine(file, line) {
+  const text = readFile(file);
+  const created = text === null;
+  const eol = text && /\r\n/.test(text) ? '\r\n' : '\n';
+  try {
+    if (created) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, '# Backlog' + eol + eol + line + eol, 'utf8');
+    } else {
+      const pad = text.length === 0 || text.endsWith(eol) ? '' : eol;
+      fs.appendFileSync(file, pad + line + eol, 'utf8');
+    }
+    return { ok: true, created };
+  } catch (err) {
+    return { ok: false, error: err && err.message ? err.message : String(err) };
+  }
+}
+
+// Turn one line into `- [x] ...`, leaving every other character of the file
+// alone. The line is found the way `parseBacklog` found it, so an item can
+// always be ticked by the text `pick` printed.
+function tick(file, text) {
+  const original = readFile(file);
+  if (original === null) return { ok: false, error: file + ' is not there any more' };
+  const eol = /\r\n/.test(original) ? '\r\n' : '\n';
+  const lines = original.split(/\r?\n/);
+  const wanted = key(text);
+  for (let i = 0; i < lines.length; i += 1) {
+    const match = lines[i].match(ITEM);
+    if (!match) continue;
+    if (match[1] && match[1].toLowerCase() === 'x') continue;
+    const body = match[2].replace(SIZE_TAG, '').trim();
+    if (key(body) !== wanted) continue;
+    lines[i] = match[1]
+      ? lines[i].replace(/\[\s\]/, '[x]')
+      : lines[i].replace(/^(\s*[-*]\s+)/, '$1[x] ');
+    try {
+      fs.writeFileSync(file, lines.join(eol), 'utf8');
+      return { ok: true, line: lines[i].trim() };
+    } catch (err) {
+      return { ok: false, error: err && err.message ? err.message : String(err) };
+    }
+  }
+  return { ok: false, error: 'no unticked line matching that text in ' + file };
+}
+
+// A `@tag` is a label, not a lookup, so this only ever decides whether to say
+// "there is no such directory" alongside a line that was written regardless.
+function repoOnDisk(tag, root) {
+  if (!tag) return null;
+  const expanded = String(tag).startsWith('~') ? path.join(os.homedir(), String(tag).slice(1)) : String(tag);
+  const candidates =
+    expanded.indexOf('/') !== -1 || path.isAbsolute(expanded)
+      ? [path.resolve(expanded)]
+      : [
+          path.join(path.dirname(root), expanded),
+          path.join(os.homedir(), expanded),
+          path.join(os.homedir(), 'projects', expanded),
+        ];
+  for (const dir of candidates) {
+    try {
+      if (fs.statSync(dir).isDirectory()) return dir;
+    } catch (err) {
+      // Not this one.
+    }
+  }
+  return null;
+}
+
+const ISSUE_ITEM = /^#(\d+)\s+/;
+
+// The gap that made labelled issues immortal: they were picked, done, and
+// picked again the next night, because nothing ever closed them.
+function closeIssue(number, root) {
+  if (!onPath('gh')) return { ok: false, error: 'gh is not on PATH' };
+  try {
+    const run = spawnSync('gh', ['issue', 'close', String(number), '--comment', GH_CLOSE_COMMENT], {
+      cwd: root,
+      encoding: 'utf8',
+      timeout: GH_TIMEOUT_MS,
+    });
+    if (run.status === 0) return { ok: true };
+    const said = String(run.stderr || run.stdout || '').trim().split(/\r?\n/)[0];
+    return { ok: false, error: said || 'gh exited ' + run.status };
+  } catch (err) {
+    return { ok: false, error: err && err.message ? err.message : String(err) };
+  }
+}
+
+// Flags that take the next word, so `burn add fix the --size S thing` cannot
+// end up with "S" in the middle of the item text.
+const VALUE_FLAGS = new Set(['--size', '--repo', '--cwd', '--session-id', '--before', '--min-turns']);
+
+function parseFlags(argv) {
+  const args = (argv || []).filter((arg) => arg !== undefined && arg !== null);
+  const flags = {};
+  const positional = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = String(args[i]);
+    if (arg.indexOf('--') !== 0) {
+      positional.push(arg);
+      continue;
+    }
+    const eq = arg.indexOf('=');
+    const name = eq === -1 ? arg : arg.slice(0, eq);
+    let value = eq === -1 ? null : arg.slice(eq + 1);
+    if (VALUE_FLAGS.has(name)) {
+      if (value === null) {
+        value = args[i + 1] === undefined ? null : String(args[i + 1]);
+        i += 1;
+      }
+      flags[name] = value;
+    } else {
+      flags[name] = value === null ? true : value;
+    }
+  }
+  return { flags, positional };
+}
+
+// The text of an item, from whatever is left once the subcommand and the flags
+// are taken out. Quoted or not: `burn add fix the flaky test` is what somebody
+// types when they are in a hurry, and it should work.
+function subject(positional, command) {
+  return positional
+    .filter((word, index) => !(index === 0 && word === command))
+    .join(' ')
+    .trim();
+}
+
+// Anything that exits non-zero says so by returning this instead of a string.
+// The older commands still return plain strings, and both callers accept
+// either, so nothing that already worked had to change shape.
+function refuse(text) {
+  return { text: text, code: 1 };
 }
 
 /* ----------------------------------------------------------- the budget --- */
@@ -394,8 +646,103 @@ function renderList(found) {
   return lines.join('\n');
 }
 
+// One command, three destinations, and the script picks. The alternative is a
+// paragraph in a skill telling Claude which file to edit by hand, which is a
+// paragraph that has to be read, reasoned about and got right every time.
+//
+//   burn add "Fix the flaky drift test" --size S   -> this repo's BACKLOG.md
+//   burn add "Upgrade node everywhere" --global    -> ~/.claude/backlog.md
+//   burn add "Fix auth redirect" --repo kosha      -> the same, tagged @kosha
+function add(now, argv, options) {
+  const opts = options || {};
+  const { flags, positional } = parseFlags(argv);
+  const text = subject(positional, 'add');
+  if (!text) {
+    return refuse('Nothing to add. burn add "<what to do>" [--size S|M|L] [--global | --repo <name>]');
+  }
+  const wantsRepo = Object.prototype.hasOwnProperty.call(flags, '--repo');
+  const wantsGlobal = Object.prototype.hasOwnProperty.call(flags, '--global');
+  if (wantsGlobal && wantsRepo) {
+    return refuse('--global and --repo say different things; pick one. --repo already means the global file.');
+  }
+  if (wantsRepo && (flags['--repo'] === true || !flags['--repo'])) {
+    return refuse('--repo needs the name or path of a repository.');
+  }
+
+  const turnsFor = opts.sizes || sizes();
+  const raw = flags['--size'] === undefined || flags['--size'] === true ? DEFAULT_SIZE : String(flags['--size']);
+  const size = raw.toUpperCase();
+  if (!Object.prototype.hasOwnProperty.call(turnsFor, size)) {
+    return refuse('Unknown size "' + raw + '"; it is S, M or L.');
+  }
+
+  const root = opts.root || gitRoot(opts.cwd || process.cwd());
+
+  // Checked before anything is written, against all three sources, because the
+  // alternative is Claude reading two files and a GitHub issue list to find
+  // out - and getting it wrong when the line is in the one it did not read.
+  const already = findExisting(everywhere(root, turnsFor, { gh: opts.gh }), text);
+  if (already) {
+    return (
+      'Already on the backlog, so nothing was written:\n  ' +
+      already.text +
+      '   (' +
+      already.source +
+      ')'
+    );
+  }
+
+  const tag = wantsRepo ? String(flags['--repo']) : null;
+  const file = tag || wantsGlobal ? globalBacklogFile() : path.join(root, 'BACKLOG.md');
+  const line = '- ' + text + (tag ? ' @' + tag : '') + ' ~' + size;
+
+  const wrote = appendLine(file, line);
+  if (!wrote.ok) return refuse('Could not write ' + file + ': ' + wrote.error);
+
+  const lines = [];
+  if (wrote.created) lines.push('Created ' + file + '.');
+  lines.push(line);
+  lines.push('-> ' + file);
+  if (tag && !repoOnDisk(tag, root)) {
+    lines.push('No directory named "' + tag + '" was found; the tag is a label, not a lookup, so it was written anyway.');
+  }
+  return lines.join('\n');
+}
+
+// What `pick` leaves behind so `done` can tell work from no work. Merged into
+// whatever the record already holds, because an armed wake lives there too.
+function rememberPlan(plan) {
+  const record = readRecord() || {};
+  record.plan = plan;
+  writeRecord(record);
+  return plan;
+}
+
 async function pick(now, argv, options) {
   const opts = options || {};
+  const unattended = (argv || []).indexOf('--unattended') !== -1;
+  const root = opts.root || gitRoot(opts.cwd || process.cwd());
+
+  // Both refusals come before the account is read, let alone before anything
+  // is edited: an unattended run that cannot be undone must not start, and
+  // saying so costs two git calls.
+  if (unattended) {
+    if (!isGitRepo(root)) {
+      return refuse(
+        'Not a git repository: ' + root + '\n' +
+          'An unattended run there has no undo, so nothing was started. Run `burn pick` yourself, or `git init` first.'
+      );
+    }
+    const dirty = gitStatus(root);
+    if (dirty) {
+      return refuse(
+        'The working tree is not clean, so an unattended run would edit work in progress:\n' +
+          dirty.split(/\r?\n/).map((line) => '  ' + line).join('\n') + '\n' +
+          'Nothing was started and nothing was scheduled. Commit it or put it aside, then run this again.'
+      );
+    }
+  }
+
   const state = opts.reading || (await reading(now, argv));
   const found = opts.backlog || collect({ cwd: opts.cwd || process.cwd() });
   const surplus = state.surplus;
@@ -411,10 +758,9 @@ async function pick(now, argv, options) {
 
   if (!found.items.length) {
     // The one place this command asks Claude to think of work rather than read
-    // it, and it is bounded on both sides: a handful of candidates, and a
-    // question before anything starts. Nothing here runs unattended - `arm`
-    // refuses an empty backlog outright - so this path only ever happens with
-    // somebody watching.
+    // it, and it is bounded on three ways: a handful of candidates, a question
+    // before anything starts, and not at all when nobody is watching.
+    if (unattended) return 'Surplus of ' + surplus.expiringTurns + ' turns and nothing on the backlog. Nothing to do.';
     return (
       'Surplus of ' + surplus.expiringTurns + ' turns and no backlog. Suggest 3-5 candidates from ' +
       'this repo (TODO/FIXME comments, failing or missing tests, stale docs, open issues) and ask ' +
@@ -433,24 +779,235 @@ async function pick(now, argv, options) {
     );
   }
 
-  const lines = [head, '', 'Plan, ' + spent + ' of ' + surplus.expiringTurns + ' turns:'];
+  const lines = [];
+
+  // The branch is made here and nowhere earlier: a run that had no surplus, or
+  // nothing that fitted, should leave the repository exactly as it found it.
+  let branch = null;
+  if (unattended) {
+    branch = branchName(root, now);
+    const made = git(['checkout', '-b', branch], root);
+    if (made.status !== 0) {
+      return refuse(
+        'Could not create the branch ' + branch + ': ' +
+          (String(made.stderr || made.stdout || '').trim().split(/\r?\n/)[0] || 'git exited ' + made.status) +
+          '\nNothing was started.'
+      );
+    }
+    lines.push(
+      'On branch ' + branch + ', cut from ' + shortSha(gitHead(root)) +
+        '. All of this work goes there; nothing is pushed and the branch you were on is untouched.'
+    );
+    lines.push('');
+  }
+
+  lines.push(head, '', 'Plan, ' + spent + ' of ' + surplus.expiringTurns + ' turns:');
   chosen.forEach((item, index) => {
     lines.push('  ' + (index + 1) + '. [' + item.size + ', ' + item.turns + '] ' + item.text + '   (' + item.source + ')');
   });
   lines.push('');
   lines.push(
-    'Do these now, in order; stop when the window resets or the list ends; mark each done in its ' +
-      'BACKLOG.md line (`- [x]`) when finished.'
+    'Do these now, in order; stop when the window resets or the list ends; run `burn done <n>` after ' +
+      'each one, which ticks its BACKLOG.md line (`- [x]`), closes its issue if it was one' +
+      (branch ? ', and commits to the branch' : '') + '.'
   );
+
+  // The marker `done` verifies against. Written last, so a plan that was never
+  // printed can never be used to justify ticking something off.
+  const snapshot = gitStatus(root);
+  rememberPlan({
+    at: now,
+    root,
+    head: gitHead(root),
+    status: snapshot,
+    dirty: Boolean(snapshot),
+    unattended,
+    branch,
+    items: chosen.map((item) => ({ text: item.text, size: item.size, turns: item.turns, source: item.source })),
+  });
+
+  return lines.join('\n');
+}
+
+/* ------------------------------------------------------------- done ------- */
+
+// Did anything actually happen since the plan was printed?
+//
+// This exists because the expensive failure mode of an unattended run is not a
+// bad edit, it is a run that did nothing and said it was finished: the item
+// gets ticked, the issue gets closed, and the work is gone from the list
+// without ever having been done. HEAD and the porcelain status are the two
+// cheapest facts that cannot be got wrong.
+function verify(root, plan) {
+  if (!isGitRepo(root)) {
+    return { ok: true, note: 'Not a git repository, so there is nothing to compare against; ticking on trust.' };
+  }
+  if (!plan || typeof plan.status === 'undefined') {
+    return { ok: true, note: '`burn pick` recorded no plan, so there is nothing to compare against; ticking on trust.' };
+  }
+  const head = gitHead(root);
+  const status = gitStatus(root);
+  const moved = head !== (plan.head || null);
+  const changed = status !== (typeof plan.status === 'string' ? plan.status : null);
+  if (moved || changed) return { ok: true, note: null };
+  return {
+    ok: false,
+    checked: [
+      'HEAD is still ' + shortSha(head) + ', the commit `burn pick` recorded at ' + clock(plan.at) + '.',
+      'git status --porcelain is byte for byte what it was then (' + (plan.dirty ? 'dirty then, identically dirty now' : 'clean then, clean now') + ').',
+    ],
+  };
+}
+
+// Which item is meant. Exact text first, then the number `pick` printed beside
+// it, then a substring - and an ambiguous substring is a question, not a
+// guess, because the cost of guessing here is ticking off the wrong thing.
+function exactMatch(wanted, pool) {
+  return (
+    pool.find((item) => item.text === wanted) || pool.find((item) => key(item.text) === key(wanted)) || null
+  );
+}
+
+function looseMatch(wanted, pool) {
+  const id = key(wanted);
+  return id ? pool.filter((item) => key(item.text).indexOf(id) !== -1) : [];
+}
+
+function commitBurn(root, branch, texts) {
+  const current = gitBranch(root);
+  if (branch && current !== branch) {
+    return { ok: false, error: 'the checkout is on ' + current + ', not ' + branch + '; nothing was committed' };
+  }
+  if (!gitStatus(root)) return { ok: false, empty: true };
+  const staged = git(['add', '-A'], root);
+  if (staged.status !== 0) {
+    return { ok: false, error: String(staged.stderr || '').trim().split(/\r?\n/)[0] || 'git add exited ' + staged.status };
+  }
+  const subjectLine = texts.length === 1 ? 'burn: ' + texts[0] : 'burn: ' + texts.length + ' backlog items';
+  const body = texts.map((text) => '- ' + text).join('\n');
+  const run = git(['commit', '-m', subjectLine, '-m', body], root, GIT_COMMIT_TIMEOUT_MS);
+  if (run.status !== 0) {
+    return { ok: false, error: String(run.stderr || run.stdout || '').trim().split(/\r?\n/)[0] || 'git commit exited ' + run.status };
+  }
+  return { ok: true, subject: subjectLine, sha: shortSha(gitHead(root)) };
+}
+
+//   burn done "Fix the flaky drift test"
+//   burn done 2            the number pick printed
+//   burn done --all
+function done(now, argv, options) {
+  const opts = options || {};
+  const { flags, positional } = parseFlags(argv);
+  const wanted = subject(positional, 'done');
+  const all = Boolean(flags['--all']);
+  const force = Boolean(flags['--force']);
+  const root = opts.root || gitRoot(opts.cwd || process.cwd());
+  const turnsFor = opts.sizes || sizes();
+  const record = readRecord();
+  const plan = record && record.plan && typeof record.plan === 'object' ? record.plan : null;
+  const planItems = plan && Array.isArray(plan.items) ? plan.items : [];
+
+  if (!all && !wanted) {
+    return refuse('Which one? burn done "<the item>", or the number `pick` printed, or --all.');
+  }
+
+  const checked = verify(root, plan);
+  if (!checked.ok && !force) {
+    return refuse(
+      'Nothing has changed since `burn pick` printed the plan, so there is nothing to mark done.\n' +
+        checked.checked.map((line) => '  - ' + line).join('\n') + '\n' +
+        'Do the work first, or pass --force to tick it off anyway.'
+    );
+  }
+
+  // The file each item actually lives in, which is what gets edited. The plan
+  // is only consulted for the numbering and for --all.
+  const pool = everywhere(root, turnsFor, { gh: opts.gh });
+  const seen = new Set();
+  const candidates = [];
+  for (const item of pool.concat(planItems)) {
+    const id = key(item.text);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    candidates.push(item);
+  }
+
+  let targets = [];
+  if (all) {
+    if (!planItems.length) return refuse('`burn pick` recorded no plan, so --all has nothing to tick off.');
+    targets = planItems.map((item) => exactMatch(item.text, candidates) || item);
+  } else {
+    const index = /^\d+$/.test(wanted) ? Number(wanted) : null;
+    const exact = exactMatch(wanted, candidates);
+    const numbered = index && planItems[index - 1] ? planItems[index - 1] : null;
+    if (exact) targets = [exact];
+    else if (numbered) targets = [exactMatch(numbered.text, candidates) || numbered];
+    else {
+      const loose = looseMatch(wanted, candidates);
+      if (loose.length === 1) targets = [loose[0]];
+      else if (loose.length > 1) {
+        return refuse(
+          '"' + wanted + '" matches ' + loose.length + ' items:\n' +
+            loose.map((item) => '  ' + item.text + '   (' + item.source + ')').join('\n') + '\n' +
+            'Say which one in full, or give its number from the plan.'
+        );
+      } else return refuse('Nothing on the backlog matches "' + wanted + '". `burn list` shows what is there.');
+    }
+  }
+
+  const lines = [];
+  if (checked.note) lines.push(checked.note);
+  if (!checked.ok && force) {
+    lines.push('--force: nothing has changed since `burn pick` printed the plan, and it is being ticked off regardless.');
+  }
+
+  const ticked = [];
+  for (const item of targets) {
+    const issue = String(item.text).match(ISSUE_ITEM);
+    if (issue) {
+      const close = opts.closeIssue ? opts.closeIssue(issue[1], root) : opts.gh === false ? { ok: false, error: 'gh was not consulted' } : closeIssue(issue[1], root);
+      // Non-fatal on purpose: no gh, no network or no permission is a reason
+      // to say so, not a reason to leave the rest of the run unfinished.
+      lines.push(close && close.ok ? 'Closed issue #' + issue[1] + '.' : 'Could not close issue #' + issue[1] + ': ' + ((close && close.error) || 'unknown') + '. Close it by hand.');
+      ticked.push(item.text);
+      continue;
+    }
+    const file = item.source && item.source.indexOf(path.sep) !== -1 ? item.source : path.join(root, 'BACKLOG.md');
+    const wrote = tick(file, item.text);
+    if (wrote.ok) {
+      lines.push(wrote.line + '   (' + file + ')');
+      ticked.push(item.text);
+    } else {
+      lines.push('Could not tick "' + item.text + '": ' + wrote.error);
+    }
+  }
+
+  if (!ticked.length) return refuse(lines.join('\n'));
+
+  if (plan && plan.branch) {
+    const committed = commitBurn(root, plan.branch, ticked);
+    if (committed.ok) {
+      lines.push(
+        'Committed ' + committed.sha + ' to ' + plan.branch + ': ' + committed.subject +
+          '. Review that branch and merge or drop it; nothing was pushed.'
+      );
+    } else if (committed.empty) {
+      lines.push('Nothing to commit on ' + plan.branch + '.');
+    } else {
+      lines.push('Could not commit to ' + plan.branch + ': ' + committed.error + '.');
+    }
+  }
+
   return lines.join('\n');
 }
 
 // The prompt the wake delivers. It references `pick` and nothing else on
 // purpose: whatever is on the backlog at the moment it fires is the whole
 // scope, and a prompt that described the work itself would be a prompt that
-// could go stale between arming and firing.
+// could go stale between arming and firing. `--unattended` is the difference
+// between a wake and a person: a clean tree, a branch of its own, or nothing.
 const WAKE_PROMPT =
-  'Run /usage-limits:burn pick and do exactly what it prints. Do not start anything not on that list.';
+  'Run /usage-limits:burn pick --unattended and do exactly what it prints. Do not start anything not on that list.';
 
 async function arm(now, argv, options) {
   const opts = options || {};
@@ -569,7 +1126,13 @@ function status(now, argv, options) {
 
 const HELP = [
   'burn list                     what is on the backlog, and where it came from',
-  'burn pick                     what fits in the budget that is about to expire',
+  'burn add "<what to do>" [--size S|M|L] [--global | --repo <name>]',
+  '                              write one line: this repo by default, global with',
+  '                              --global, global and tagged with --repo',
+  'burn pick [--unattended]      what fits in the budget that is about to expire;',
+  '                              --unattended needs a clean tree and works on a branch',
+  'burn done "<item>" | <n> | --all [--force]',
+  '                              tick it off, close its issue, commit an unattended run',
   'burn arm [--before 20] [--min-turns 10]',
   '                              book a wake shortly before the reset',
   'burn cancel                   call that wake off',
@@ -586,15 +1149,24 @@ async function main(argv, now, options) {
   if (first === 'status') return status(at, args, options);
   if (first === 'cancel' || first === 'off') return cancel(at, args);
   if (first === 'arm') return arm(at, args, options);
+  if (first === 'add') return add(at, args, options);
+  if (first === 'done') return done(at, args, options);
   if (first === 'pick') return pick(at, args, options);
   return 'Unknown: ' + first + '\n' + HELP;
 }
 
+// Commands that can fail return { text, code }; the ones that were here before
+// still return a string. Both callers unwrap the same way.
+function spoken(out) {
+  return typeof out === 'string' ? { text: out, code: 0 } : { text: out.text, code: out.code || 0 };
+}
+
 if (require.main === module) {
   main(process.argv.slice(2), Date.now()).then(
-    (text) => {
-      process.stdout.write(text + '\n');
-      process.exitCode = 0;
+    (out) => {
+      const said = spoken(out);
+      process.stdout.write(said.text + '\n');
+      process.exitCode = said.code;
     },
     (err) => {
       process.stderr.write('burn: ' + (err && err.message ? err.message : String(err)) + '\n');
@@ -615,7 +1187,21 @@ module.exports = {
   globalBacklogFile,
   sizes,
   gitRoot,
+  isGitRepo,
+  gitHead,
+  gitStatus,
+  gitBranch,
+  branchName,
+  key,
+  everywhere,
+  findExisting,
+  appendLine,
+  tick,
+  verify,
+  spoken,
   reading,
+  add,
+  done,
   pick,
   arm,
   cancel,

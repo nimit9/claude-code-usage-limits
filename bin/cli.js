@@ -23,7 +23,12 @@ const HELP = `claude-usage-limits - how much agent usage is left, and whether th
   claude-usage-limits panel --once        one frame, for a pipe or a screenshot
 
   claude-usage-limits burn list           the backlog this repo and you keep
+  claude-usage-limits burn add "<thing>"  write it down: this repo's BACKLOG.md
+  claude-usage-limits burn add "<thing>" --global        ~/.claude/backlog.md
+  claude-usage-limits burn add "<thing>" --repo kosha    the same, tagged @kosha
   claude-usage-limits burn pick           what fits in budget about to expire
+  claude-usage-limits burn pick --unattended   clean tree only, on a branch of its own
+  claude-usage-limits burn done "<thing>" tick it off, close its issue, commit it
   claude-usage-limits burn arm            wake shortly before the reset to spend it
   claude-usage-limits burn cancel         call that wake off
   claude-usage-limits burn status         what is armed, and where the backlog came from
@@ -93,9 +98,12 @@ function run(argv) {
 
   if (args[0] === 'burn') {
     const burn = require('../skills/usage-limits/scripts/burn.js');
-    return burn.main(args.slice(1), Date.now()).then((text) => {
-      process.stdout.write(text + '\n');
-      return 0;
+    return burn.main(args.slice(1), Date.now()).then((out) => {
+      // `add` and `done` refuse things, and a refusal that exits 0 is a
+      // refusal nothing downstream can see.
+      const said = burn.spoken(out);
+      process.stdout.write(said.text + '\n');
+      return said.code;
     });
   }
 

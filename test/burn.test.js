@@ -221,7 +221,11 @@ test('surplus and a backlog is a plan, with the budget on it', async () => {
     assert.match(said, /2\. \[M, 25\] Document the permission mode/);
     assert.doesNotMatch(said, /Rewrite the calibration pass/);
     assert.match(said, /Do these now, in order; stop when the window resets or the list ends/);
-    assert.match(said, /mark each done in its BACKLOG\.md line \(`- \[x\]`\)/);
+    // The tick is a command now rather than an instruction to edit a file by
+    // hand, because `burn done` is also what closes the issue and verifies
+    // that anything happened at all.
+    assert.match(said, /run `burn done <n>` after each one/);
+    assert.match(said, /ticks its BACKLOG\.md line \(`- \[x\]`\)/);
   });
 });
 
@@ -304,7 +308,7 @@ test('arming records the wake, and arming again for the same moment does not', a
 
     // And the prompt the wake will deliver names `pick` and nothing else, so
     // an unattended run cannot reach past the list.
-    assert.match(burn.WAKE_PROMPT, /^Run \/usage-limits:burn pick and do exactly what it prints\./);
+    assert.match(burn.WAKE_PROMPT, /^Run \/usage-limits:burn pick --unattended and do exactly what it prints\./);
     assert.match(burn.WAKE_PROMPT, /Do not start anything not on that list\.$/);
 
     const cancelled = await burn.main(['cancel'], NOW + 2 * MINUTE, options);
