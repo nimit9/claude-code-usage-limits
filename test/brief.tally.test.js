@@ -116,3 +116,16 @@ test('tallyContext says nothing at all with no history', () => {
   assert.deepStrictEqual(found, { lastReply: null, context: null, lastSession: null });
   assert.deepStrictEqual(brief.tallyContext(null, null, NOW), { lastReply: null, context: null, lastSession: null });
 });
+
+test('a compaction newer than the last reply means the tally context is stale', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'compact-')), 't.jsonl');
+  const reply = JSON.stringify({ type: 'assistant', message: { usage: { input_tokens: 1 } } });
+  const boundary = JSON.stringify({ type: 'system', subtype: 'compact_boundary' });
+  fs.writeFileSync(file, reply + '\n' + boundary + '\n');
+  assert.strictEqual(brief.compactedSince(file), true);
+  fs.appendFileSync(file, reply + '\n');
+  assert.strictEqual(brief.compactedSince(file), false);
+});

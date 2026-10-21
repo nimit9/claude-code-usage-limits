@@ -1302,6 +1302,32 @@ function isTallyEntry(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+// True when the newest thing in the transcript is a compaction: the tally only
+// moves on Stop, so until the first reply after /compact its context figure is
+// the pre-compact one. The tail is enough; a boundary older than that has had
+// replies since.
+function compactedSince(transcriptPath) {
+  try {
+    const size = fs.statSync(transcriptPath).size;
+    const len = Math.min(size, 256 * 1024);
+    const buffer = Buffer.alloc(len);
+    const fd = fs.openSync(transcriptPath, 'r');
+    try {
+      fs.readSync(fd, buffer, 0, len, size - len);
+    } finally {
+      fs.closeSync(fd);
+    }
+    const lines = buffer.toString('utf8').split('\n');
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      if (lines[i].includes('"subtype":"compact_boundary"')) return true;
+      if (lines[i].includes('"type":"assistant"') && lines[i].includes('"usage"')) return false;
+    }
+  } catch (err) {
+    // No transcript to read: say nothing new.
+  }
+  return false;
+}
+
 // What the Stop hook's tally can add to the line: this session's last reply
 // and context when it is a session the tally has seen, or the previous
 // session's total when it has not, which is how a first prompt gets told what
@@ -1628,6 +1654,8 @@ async function run(now, hookInput) {
     binding.headroomMs <= RUNWAY_MENTION_MS;
   // Outside the cache on purpose: the tally moves after every reply.
   const found = tallyContext(tally.readState(), sessionId, now);
+  // Just compacted: the tally's context is the old one, so say none.
+  if (hookInput && compactedSince(hookInput.transcript_path)) found.context = null;
   // Learning how the user writes, from the prompt that just arrived. Counters
   // only, no model call, and it never speaks: what it knows is read back by
   // /usage-limits:voice and used when the relay writes as them.
@@ -1834,7 +1862,7 @@ function withBugcheck(text) {
 module.exports = { withBugcheck, sayOnce, shapeOf, saidFile, REPEAT_MS, staleVersionFor, installedVersion, runningVersion,
   readSaid, standingSaid, markStanding, standingShortFor, STANDING_SHORT, cacheMissWhyFor, missReason, MISS_RECENT_MS,
   surplusSaidAt, surplusSayable, markSurplus, SURPLUS_REPEAT_MS,
-  DEFAULTS,
+  DEFAULTS, compactedSince,
   aheadOfPace,
   pacingMatters,
   PACE_MIN_SPAN_MS,
