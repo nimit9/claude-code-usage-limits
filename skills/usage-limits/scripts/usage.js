@@ -3136,6 +3136,10 @@ function buildWindows(utilization, events, now, fetchedAt, learned, specs, rejec
       }
       // The per-model weekly windows only exist on some plans.
       if (spec.key !== 'five_hour' && spec.key !== 'seven_day' && !snapshot) return null;
+      // A verified Ultra account has no 5-hour limit (Oct 2026): the snapshot
+      // reads its weekly but neither a five_hour bucket nor a session limit.
+      // Estimating one from history would invent a limit that is not there.
+      if (spec.key === 'five_hour' && !snapshot && (utilization.seven_day || limitByKey.has('seven_day'))) return null;
       return one(spec, snapshot, events, limit);
     })
     .filter(Boolean);
