@@ -119,6 +119,13 @@ test('buildWindows takes a window from the limits list when its bucket is missin
   assert.strictEqual(five.verdict === 'unknown', false);
 });
 
+test('buildWindows leaves out the 5-hour window when the account has none (Ultra)', () => {
+  const ultra = snapshot({ five_hour: null, limits: snapshot().limits.filter((limit) => limit.kind !== 'session') });
+  const windows = usage.buildWindows(ultra, mixed(), NOW, NOW - MINUTE, {}, null, new Map());
+  assert.strictEqual(windows.find((w) => w.key === 'five_hour'), undefined);
+  assert.strictEqual(windows.find((w) => w.key === 'seven_day').percentUsed, 11);
+});
+
 test('buildWindows prices a metered window from its dollar limit, not from calibration', () => {
   const metered = snapshot({
     five_hour: { utilization: 28, resets_at: iso(NOW + 2 * HOUR), limit_dollars: 100, used_dollars: 28, remaining_dollars: 72 },
